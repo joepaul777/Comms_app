@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "1063518731720",
+    "project_id": "jp-comms",
+    "storage_bucket": "jp-comms.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:1063518731720:android:93ae2c982dd398c54894fd",
+        "android_client_info": {
+          "package_name": "com.comms.app"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyAK-BoSa4iOZdwi18tlHKn0uEW7KrlKTac"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
