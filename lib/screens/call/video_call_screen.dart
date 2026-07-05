@@ -36,6 +36,10 @@ class _VideoCallScreenState extends State<VideoCallScreen> {
   @override
   void initState() {
     super.initState();
+    _status = _callService.currentStatus;
+    if (_status == CallStatus.connected) {
+      _startTimer();
+    }
     _initRenderers();
   }
 
@@ -43,6 +47,9 @@ class _VideoCallScreenState extends State<VideoCallScreen> {
     await _localRenderer.initialize();
     await _remoteRenderer.initialize();
 
+    if (_callService.localStream != null) {
+      _localRenderer.srcObject = _callService.localStream;
+    }
     _callService.onLocalStream = (stream) {
       if (mounted) {
         setState(() {
@@ -51,6 +58,9 @@ class _VideoCallScreenState extends State<VideoCallScreen> {
       }
     };
 
+    if (_callService.remoteStream != null) {
+      _remoteRenderer.srcObject = _callService.remoteStream;
+    }
     _callService.onRemoteStream = (stream) {
       if (mounted) {
         setState(() {

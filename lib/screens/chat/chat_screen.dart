@@ -11,6 +11,7 @@ import '../../models/user_model.dart';
 import '../../models/call_model.dart';
 import '../call/audio_call_screen.dart';
 import '../call/video_call_screen.dart';
+import '../../utils/image_utils.dart';
 
 class ChatScreen extends StatefulWidget {
   final ChatRoomModel chatRoom;
@@ -248,7 +249,7 @@ class _ChatScreenState extends State<ChatScreen> {
                   borderRadius: BorderRadius.circular(12),
                   image: user?.photoUrl.isNotEmpty == true
                       ? DecorationImage(
-                          image: NetworkImage(user!.photoUrl),
+                          image: getImageProvider(user!.photoUrl),
                           fit: BoxFit.cover,
                         )
                       : null,

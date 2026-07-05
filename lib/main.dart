@@ -5,10 +5,16 @@ import 'package:firebase_auth/firebase_auth.dart';
 import 'theme/app_theme.dart';
 import 'screens/auth/login_screen.dart';
 import 'screens/home/home_screen.dart';
+import 'services/notification_service.dart';
+
+final GlobalKey<NavigatorState> navigatorKey = GlobalKey<NavigatorState>();
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await Firebase.initializeApp();
+
+  // Initialize notification service (FCM, local notifications)
+  await NotificationService().initialize();
 
   // Set system UI overlay style
   SystemChrome.setSystemUIOverlayStyle(
@@ -23,8 +29,34 @@ void main() async {
   runApp(const CommsApp());
 }
 
-class CommsApp extends StatelessWidget {
+class CommsApp extends StatefulWidget {
   const CommsApp({super.key});
+
+  @override
+  State<CommsApp> createState() => _CommsAppState();
+}
+
+class _CommsAppState extends State<CommsApp> {
+  @override
+  void initState() {
+    super.initState();
+    // Wire up the notification tap handler to navigate to the right screen
+    NotificationService().onNotificationTap = (type, id) {
+      if (type == 'chat') {
+        // Navigate to the home screen — user can tap the chat from the list
+        navigatorKey.currentState?.pushAndRemoveUntil(
+          MaterialPageRoute(builder: (_) => const HomeScreen()),
+          (route) => false,
+        );
+      } else if (type == 'call') {
+        // Navigate to home screen — the incoming call listener will pick it up
+        navigatorKey.currentState?.pushAndRemoveUntil(
+          MaterialPageRoute(builder: (_) => const HomeScreen()),
+          (route) => false,
+        );
+      }
+    };
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -32,6 +64,7 @@ class CommsApp extends StatelessWidget {
       title: 'Comms',
       debugShowCheckedModeBanner: false,
       theme: AppTheme.darkTheme,
+      navigatorKey: navigatorKey,
       home: StreamBuilder<User?>(
         stream: FirebaseAuth.instance.authStateChanges(),
         builder: (context, snapshot) {
@@ -40,6 +73,8 @@ class CommsApp extends StatelessWidget {
           }
 
           if (snapshot.hasData) {
+            // Save FCM token each time user is confirmed signed-in
+            NotificationService().onUserSignedIn();
             return const HomeScreen();
           }
 

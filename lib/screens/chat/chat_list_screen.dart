@@ -6,6 +6,7 @@ import '../../services/chat_service.dart';
 import '../../services/user_service.dart';
 import '../../models/chat_room_model.dart';
 import '../../models/user_model.dart';
+import '../../utils/image_utils.dart';
 import 'chat_screen.dart';
 import 'create_group_screen.dart';
 
@@ -222,7 +223,7 @@ class _ChatRoomTile extends StatelessWidget {
                     border: Border.all(color: AppColors.border),
                     image: photoUrl.isNotEmpty
                         ? DecorationImage(
-                            image: NetworkImage(photoUrl),
+                            image: getImageProvider(photoUrl),
                             fit: BoxFit.cover,
                           )
                         : null,

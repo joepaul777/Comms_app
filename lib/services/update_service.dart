@@ -29,11 +29,10 @@ class UpdateService {
         
         final data = response.data;
         if (data is String) {
-          // In case the response is not auto-parsed to JSON
           final parsed = jsonDecode(data);
-          _compareAndPrompt(context, parsed);
+          if (context.mounted) _compareAndPrompt(context, parsed);
         } else {
-          _compareAndPrompt(context, data);
+          if (context.mounted) _compareAndPrompt(context, data);
         }
       }
     } catch (e) {

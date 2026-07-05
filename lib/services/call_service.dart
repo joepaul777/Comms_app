@@ -1,30 +1,60 @@
+import 'dart:async';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'package:uuid/uuid.dart';
 import '../models/call_model.dart';
+import 'notification_service.dart';
 
 class CallService {
+  static final CallService _instance = CallService._internal();
+  factory CallService() => _instance;
+  CallService._internal();
+
   final FirebaseFirestore _firestore = FirebaseFirestore.instance;
   final Uuid _uuid = const Uuid();
 
   RTCPeerConnection? _peerConnection;
   MediaStream? _localStream;
   MediaStream? _remoteStream;
+  StreamSubscription? _callSubscription;
+  StreamSubscription? _callerCandidatesSubscription;
+  StreamSubscription? _receiverCandidatesSubscription;
 
   // Callbacks
   Function(MediaStream)? onLocalStream;
   Function(MediaStream)? onRemoteStream;
   Function(CallStatus)? onCallStatusChanged;
 
+  // Stream getters & Status
+  CallStatus _currentStatus = CallStatus.ringing;
+  CallStatus get currentStatus => _currentStatus;
+  MediaStream? get localStream => _localStream;
+  MediaStream? get remoteStream => _remoteStream;
+
+  // Free STUN + metered.ca free TURN servers for reliable NAT traversal
   final Map<String, dynamic> _iceServers = {
     'iceServers': [
       {'urls': 'stun:stun.l.google.com:19302'},
       {'urls': 'stun:stun1.l.google.com:19302'},
-      {'urls': 'stun:stun2.l.google.com:19302'},
+      {
+        'urls': 'turn:a.relay.metered.ca:80',
+        'username': 'openrelayproject',
+        'credential': 'openrelayproject',
+      },
+      {
+        'urls': 'turn:a.relay.metered.ca:443',
+        'username': 'openrelayproject',
+        'credential': 'openrelayproject',
+      },
+      {
+        'urls': 'turn:a.relay.metered.ca:443?transport=tcp',
+        'username': 'openrelayproject',
+        'credential': 'openrelayproject',
+      },
     ],
   };
 
-  // Initiate a call
+  /// Initiate a call (caller side)
   Future<CallModel> makeCall({
     required String callerId,
     required String callerName,
@@ -36,7 +66,6 @@ class CallService {
   }) async {
     final callId = _uuid.v4();
 
-    // Create call document
     final call = CallModel(
       id: callId,
       callerId: callerId,
@@ -51,28 +80,102 @@ class CallService {
 
     await _firestore.collection('calls').doc(callId).set(call.toMap());
 
-    // Set up WebRTC
+    // Notify receiver via push notification
+    _sendCallNotification(
+      receiverId: receiverId,
+      callerName: callerName,
+      callId: callId,
+      isVideo: type == CallType.video,
+    );
+
+    // Initialize WebRTC FIRST, set up ICE collection BEFORE creating offer
     await _initializeWebRTC(type == CallType.video);
-    await _createOffer(callId);
+
+    // Collect ICE candidates and send to 'callerCandidates' subcollection
+    _peerConnection!.onIceCandidate = (RTCIceCandidate candidate) {
+      if (candidate.candidate != null) {
+        _firestore
+            .collection('calls')
+            .doc(callId)
+            .collection('callerCandidates')
+            .add(candidate.toMap());
+      }
+    };
+
+    // Create and set offer
+    final offer = await _peerConnection!.createOffer();
+    await _peerConnection!.setLocalDescription(offer);
+    await _firestore.collection('calls').doc(callId).update({
+      'offer': {'sdp': offer.sdp, 'type': offer.type},
+    });
+
+    // Listen for receiver's ICE candidates
+    _listenForRemoteCandidates(callId, 'receiverCandidates');
+
+    // Listen for the answer from the receiver
+    _callSubscription = _firestore
+        .collection('calls')
+        .doc(callId)
+        .snapshots()
+        .listen((snapshot) async {
+      final data = snapshot.data();
+      if (data == null) return;
+
+      // Apply answer once it arrives
+      if (data['answer'] != null &&
+          _peerConnection?.signalingState ==
+              RTCSignalingState.RTCSignalingStateHaveLocalOffer) {
+        final answer = data['answer'];
+        await _peerConnection?.setRemoteDescription(
+          RTCSessionDescription(answer['sdp'], answer['type']),
+        );
+      }
+
+      // Report status changes
+      if (data['status'] != null) {
+        final status = CallStatus.values.firstWhere(
+          (e) => e.name == data['status'],
+          orElse: () => CallStatus.ringing,
+        );
+        _updateStatus(status);
+      }
+    });
 
     return call;
   }
 
-  // Answer a call
-  Future<void> answerCall(String callId, bool isVideo) async {
+  void _updateStatus(CallStatus status) {
+    _currentStatus = status;
+    onCallStatusChanged?.call(status);
+  }
 
+  /// Answer a call (receiver side)
+  Future<void> answerCall(String callId, bool isVideo) async {
     await _initializeWebRTC(isVideo);
 
-    // Get the offer
-    final callDoc = await _firestore.collection('calls').doc(callId).get();
-    final offer = callDoc.data()?['offer'];
+    // Collect ICE candidates and send to 'receiverCandidates' subcollection
+    _peerConnection!.onIceCandidate = (RTCIceCandidate candidate) {
+      if (candidate.candidate != null) {
+        _firestore
+            .collection('calls')
+            .doc(callId)
+            .collection('receiverCandidates')
+            .add(candidate.toMap());
+      }
+    };
+
+    // Get the offer from Firestore
+    final callDoc =
+        await _firestore.collection('calls').doc(callId).get();
+    final data = callDoc.data();
+    final offer = data?['offer'];
 
     if (offer != null) {
-      await _peerConnection?.setRemoteDescription(
+      await _peerConnection!.setRemoteDescription(
         RTCSessionDescription(offer['sdp'], offer['type']),
       );
 
-      // Create answer
+      // Create and set answer
       final answer = await _peerConnection!.createAnswer();
       await _peerConnection!.setLocalDescription(answer);
 
@@ -82,96 +185,29 @@ class CallService {
       });
     }
 
-    // Listen for remote ICE candidates
-    _listenForIceCandidates(callId, 'callerCandidates');
-  }
+    // Listen for caller's ICE candidates
+    _listenForRemoteCandidates(callId, 'callerCandidates');
 
-  // Initialize WebRTC
-  Future<void> _initializeWebRTC(bool enableVideo) async {
-    _peerConnection = await createPeerConnection(_iceServers);
-
-    // Get local media stream
-    final mediaConstraints = {
-      'audio': true,
-      'video': enableVideo
-          ? {'facingMode': 'user', 'width': 640, 'height': 480}
-          : false,
-    };
-
-    _localStream = await navigator.mediaDevices.getUserMedia(mediaConstraints);
-    onLocalStream?.call(_localStream!);
-
-    // Add tracks to peer connection
-    _localStream!.getTracks().forEach((track) {
-      _peerConnection!.addTrack(track, _localStream!);
-    });
-
-    // Listen for remote streams
-    _peerConnection!.onTrack = (RTCTrackEvent event) {
-      if (event.streams.isNotEmpty) {
-        _remoteStream = event.streams[0];
-        onRemoteStream?.call(_remoteStream!);
-      }
-    };
-
-    // Handle ICE connection state changes
-    _peerConnection!.onIceConnectionState = (state) {
-      if (state == RTCIceConnectionState.RTCIceConnectionStateDisconnected ||
-          state == RTCIceConnectionState.RTCIceConnectionStateFailed) {
-        onCallStatusChanged?.call(CallStatus.ended);
-      }
-    };
-  }
-
-  // Create offer (caller side)
-  Future<void> _createOffer(String callId) async {
-    final offer = await _peerConnection!.createOffer();
-    await _peerConnection!.setLocalDescription(offer);
-
-    await _firestore.collection('calls').doc(callId).update({
-      'offer': {'sdp': offer.sdp, 'type': offer.type},
-    });
-
-    // Listen for ICE candidates
-    _peerConnection!.onIceCandidate = (RTCIceCandidate candidate) {
-      _firestore
-          .collection('calls')
-          .doc(callId)
-          .collection('callerCandidates')
-          .add(candidate.toMap());
-    };
-
-    // Listen for answer
-    _firestore
+    // Listen for call status changes (e.g., caller ends the call)
+    _callSubscription = _firestore
         .collection('calls')
         .doc(callId)
         .snapshots()
-        .listen((snapshot) async {
-      final data = snapshot.data();
-      if (data != null && data['answer'] != null) {
-        final answer = data['answer'];
-        if (_peerConnection?.signalingState ==
-            RTCSignalingState.RTCSignalingStateHaveLocalOffer) {
-          await _peerConnection?.setRemoteDescription(
-            RTCSessionDescription(answer['sdp'], answer['type']),
-          );
-        }
-      }
-      if (data != null) {
-        final status = CallStatus.values.firstWhere(
-          (e) => e.name == data['status'],
-          orElse: () => CallStatus.ringing,
+        .listen((snapshot) {
+      final status = snapshot.data()?['status'];
+      if (status != null) {
+        final callStatus = CallStatus.values.firstWhere(
+          (e) => e.name == status,
+          orElse: () => CallStatus.connected,
         );
-        onCallStatusChanged?.call(status);
+        _updateStatus(callStatus);
       }
     });
-
-    // Listen for remote ICE candidates
-    _listenForIceCandidates(callId, 'receiverCandidates');
   }
 
-  void _listenForIceCandidates(String callId, String collection) {
-    _firestore
+  /// Listen for remote ICE candidates and add them to the peer connection
+  void _listenForRemoteCandidates(String callId, String collection) {
+    final sub = _firestore
         .collection('calls')
         .doc(callId)
         .collection(collection)
@@ -191,19 +227,51 @@ class CallService {
       }
     });
 
-    // Also send our ICE candidates
-    _peerConnection!.onIceCandidate = (RTCIceCandidate candidate) {
-      final targetCollection =
-          collection == 'callerCandidates' ? 'receiverCandidates' : 'callerCandidates';
-      _firestore
-          .collection('calls')
-          .doc(callId)
-          .collection(targetCollection)
-          .add(candidate.toMap());
+    if (collection == 'callerCandidates') {
+      _callerCandidatesSubscription = sub;
+    } else {
+      _receiverCandidatesSubscription = sub;
+    }
+  }
+
+  /// Initialize the local WebRTC peer connection and media stream
+  Future<void> _initializeWebRTC(bool enableVideo) async {
+    _peerConnection = await createPeerConnection(_iceServers);
+
+    final mediaConstraints = {
+      'audio': true,
+      'video': enableVideo
+          ? {'facingMode': 'user', 'width': 640, 'height': 480}
+          : false,
+    };
+
+    _localStream =
+        await navigator.mediaDevices.getUserMedia(mediaConstraints);
+    onLocalStream?.call(_localStream!);
+
+    _localStream!.getTracks().forEach((track) {
+      _peerConnection!.addTrack(track, _localStream!);
+    });
+
+    _peerConnection!.onTrack = (RTCTrackEvent event) {
+      if (event.streams.isNotEmpty) {
+        _remoteStream = event.streams[0];
+        onRemoteStream?.call(_remoteStream!);
+      }
+    };
+
+    _peerConnection!.onIceConnectionState = (state) {
+      if (state == RTCIceConnectionState.RTCIceConnectionStateConnected) {
+        _updateStatus(CallStatus.connected);
+      } else if (state ==
+              RTCIceConnectionState.RTCIceConnectionStateDisconnected ||
+          state == RTCIceConnectionState.RTCIceConnectionStateFailed) {
+        _updateStatus(CallStatus.ended);
+      }
     };
   }
 
-  // End call
+  /// End the call
   Future<void> endCall(String callId) async {
     await _firestore.collection('calls').doc(callId).update({
       'status': CallStatus.ended.name,
@@ -211,7 +279,7 @@ class CallService {
     await _cleanup();
   }
 
-  // Reject call
+  /// Reject an incoming call
   Future<void> rejectCall(String callId) async {
     await _firestore.collection('calls').doc(callId).update({
       'status': CallStatus.rejected.name,
@@ -219,28 +287,48 @@ class CallService {
     await _cleanup();
   }
 
-  // Toggle mute
+  /// Look up the receiver's FCM token and send a call notification
+  Future<void> _sendCallNotification({
+    required String receiverId,
+    required String callerName,
+    required String callId,
+    required bool isVideo,
+  }) async {
+    try {
+      final userDoc =
+          await _firestore.collection('users').doc(receiverId).get();
+      final fcmToken = userDoc.data()?['fcmToken'] as String?;
+      if (fcmToken == null || fcmToken.isEmpty) return;
+
+      NotificationService.sendPushNotification(
+        recipientFcmToken: fcmToken,
+        title: isVideo ? '📹 Incoming Video Call' : '📞 Incoming Voice Call',
+        message: '$callerName is calling you',
+        data: {'type': 'call', 'id': callId},
+      );
+    } catch (_) {
+      // Notification failure should never crash the call
+    }
+  }
+
   void toggleMute(bool muted) {
     _localStream?.getAudioTracks().forEach((track) {
       track.enabled = !muted;
     });
   }
 
-  // Toggle camera
   void toggleCamera(bool off) {
     _localStream?.getVideoTracks().forEach((track) {
       track.enabled = !off;
     });
   }
 
-  // Toggle speaker
   void toggleSpeaker(bool speakerOn) {
     _localStream?.getAudioTracks().forEach((track) {
       track.enableSpeakerphone(speakerOn);
     });
   }
 
-  // Switch camera
   Future<void> switchCamera() async {
     final videoTrack = _localStream?.getVideoTracks().firstOrNull;
     if (videoTrack != null) {
@@ -248,7 +336,7 @@ class CallService {
     }
   }
 
-  // Listen for incoming calls
+  /// Listen for incoming ringing calls for the given user
   Stream<CallModel?> listenForIncomingCalls(String userId) {
     return _firestore
         .collection('calls')
@@ -263,28 +351,42 @@ class CallService {
     });
   }
 
-  // Get call history
+  /// Get call history for a user
   Stream<List<CallModel>> getCallHistory(String userId) {
     return _firestore
         .collection('calls')
-        .where('status', whereIn: [
-          CallStatus.ended.name,
-          CallStatus.missed.name,
-          CallStatus.rejected.name,
-        ])
-        .orderBy('timestamp', descending: true)
+        .where(
+          Filter.or(
+            Filter('callerId', isEqualTo: userId),
+            Filter('receiverId', isEqualTo: userId),
+          ),
+        )
         .snapshots()
-        .map((snapshot) => snapshot.docs
-            .map((doc) => CallModel.fromMap(doc.data()))
-            .where((call) =>
-                call.callerId == userId || call.receiverId == userId)
-            .toList());
+        .map((snapshot) {
+      final docs = snapshot.docs
+          .map((doc) => CallModel.fromMap(doc.data()))
+          .where((call) =>
+              call.status == CallStatus.ended ||
+              call.status == CallStatus.missed ||
+              call.status == CallStatus.rejected)
+          .toList();
+      
+      docs.sort((a, b) => b.timestamp.compareTo(a.timestamp));
+      return docs;
+    });
   }
 
-  // Cleanup
   Future<void> _cleanup() async {
+    _updateStatus(CallStatus.ended);
+    await _callSubscription?.cancel();
+    await _callerCandidatesSubscription?.cancel();
+    await _receiverCandidatesSubscription?.cancel();
+    _callSubscription = null;
+    _callerCandidatesSubscription = null;
+    _receiverCandidatesSubscription = null;
+
     _localStream?.getTracks().forEach((track) => track.stop());
-    _localStream?.dispose();
+    await _localStream?.dispose();
     _localStream = null;
     _remoteStream = null;
     await _peerConnection?.close();

@@ -5,6 +5,7 @@ import '../../services/auth_service.dart';
 import '../../services/chat_service.dart';
 import '../../services/user_service.dart';
 import '../../models/user_model.dart';
+import '../../utils/image_utils.dart';
 
 class CreateGroupScreen extends StatefulWidget {
   const CreateGroupScreen({super.key});
@@ -300,12 +301,11 @@ class _CreateGroupScreenState extends State<CreateGroupScreen> {
                               width: 44,
                               height: 44,
                               decoration: BoxDecoration(
-                                color: AppColors.bgElevated,
-                                borderRadius: BorderRadius.circular(14),
+                                color: AppColors.primary.withValues(alpha: 0.1),
+                                shape: BoxShape.circle,
                                 image: contact.photoUrl.isNotEmpty
                                     ? DecorationImage(
-                                        image:
-                                            NetworkImage(contact.photoUrl),
+                                        image: getImageProvider(contact.photoUrl),
                                         fit: BoxFit.cover,
                                       )
                                     : null,

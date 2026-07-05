@@ -42,6 +42,13 @@ class _AudioCallScreenState extends State<AudioCallScreen>
       CurvedAnimation(parent: _pulseController, curve: Curves.easeInOut),
     );
 
+    // Sync initial status
+    _status = _callService.currentStatus;
+    if (_status == CallStatus.connected) {
+      _startTimer();
+      _pulseController.stop();
+    }
+
     _callService.onCallStatusChanged = (status) {
       if (mounted) {
         setState(() => _status = status);

@@ -6,6 +6,7 @@ import '../../services/user_service.dart';
 import '../../services/chat_service.dart';
 import '../../models/user_model.dart';
 import '../chat/chat_screen.dart';
+import '../../utils/image_utils.dart';
 
 class ContactsScreen extends StatefulWidget {
   const ContactsScreen({super.key});
@@ -321,7 +322,7 @@ class _ContactTile extends StatelessWidget {
                     borderRadius: BorderRadius.circular(14),
                     image: user.photoUrl.isNotEmpty
                         ? DecorationImage(
-                            image: NetworkImage(user.photoUrl),
+                            image: getImageProvider(user.photoUrl),
                             fit: BoxFit.cover,
                           )
                         : null,

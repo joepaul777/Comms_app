@@ -2,6 +2,7 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:uuid/uuid.dart';
 import '../models/chat_room_model.dart';
 import '../models/message_model.dart';
+import 'notification_service.dart';
 
 class ChatService {
   final FirebaseFirestore _firestore = FirebaseFirestore.instance;
@@ -73,16 +74,20 @@ class ChatService {
     return chatRoom;
   }
 
-  // Get chat rooms for a user
+  // Get chat rooms for a user — sorted client-side to avoid needing a composite index
   Stream<List<ChatRoomModel>> getChatRooms(String uid) {
     return _firestore
         .collection('chatRooms')
         .where('participants', arrayContains: uid)
-        .orderBy('lastMessageTime', descending: true)
         .snapshots()
-        .map((snapshot) => snapshot.docs
-            .map((doc) => ChatRoomModel.fromMap(doc.data()))
-            .toList());
+        .map((snapshot) {
+      final rooms = snapshot.docs
+          .map((doc) => ChatRoomModel.fromMap(doc.data()))
+          .toList();
+      // Sort by lastMessageTime descending (most recent first)
+      rooms.sort((a, b) => b.lastMessageTime.compareTo(a.lastMessageTime));
+      return rooms;
+    });
   }
 
   // Get messages in a chat room
@@ -138,6 +143,52 @@ class ChatService {
     );
 
     await batch.commit();
+
+    // Send push notifications to all participants except the sender
+    _sendMessageNotifications(
+      chatRoomId: chatRoomId,
+      senderId: senderId,
+      senderName: senderName,
+      text: text,
+    );
+  }
+
+  /// Look up each participant's FCM token and send them a push notification
+  Future<void> _sendMessageNotifications({
+    required String chatRoomId,
+    required String senderId,
+    required String senderName,
+    required String text,
+  }) async {
+    try {
+      final chatRoomDoc =
+          await _firestore.collection('chatRooms').doc(chatRoomId).get();
+      if (!chatRoomDoc.exists) return;
+
+      final chatRoom = ChatRoomModel.fromMap(chatRoomDoc.data()!);
+      final recipients =
+          chatRoom.participants.where((id) => id != senderId).toList();
+
+      final isGroup = chatRoom.isGroup;
+      final chatName =
+          isGroup ? (chatRoom.groupName ?? 'Group Chat') : senderName;
+      final body = isGroup ? '$senderName: $text' : text;
+
+      for (final uid in recipients) {
+        final userDoc = await _firestore.collection('users').doc(uid).get();
+        final fcmToken = userDoc.data()?['fcmToken'] as String?;
+        if (fcmToken == null || fcmToken.isEmpty) continue;
+
+        NotificationService.sendPushNotification(
+          recipientFcmToken: fcmToken,
+          title: chatName,
+          message: body,
+          data: {'type': 'chat', 'id': chatRoomId},
+        );
+      }
+    } catch (_) {
+      // Notification failure should never crash the chat
+    }
   }
 
   // Mark messages as read
