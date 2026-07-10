@@ -4,6 +4,7 @@ import '../../theme/app_colors.dart';
 import '../../services/auth_service.dart';
 import '../../services/call_service.dart';
 import '../../models/call_model.dart';
+import '../../utils/image_utils.dart';
 
 class CallHistoryScreen extends StatefulWidget {
   const CallHistoryScreen({super.key});
@@ -122,7 +123,7 @@ class _CallHistoryScreenState extends State<CallHistoryScreen> {
                         borderRadius: BorderRadius.circular(14),
                         image: otherPhoto.isNotEmpty
                             ? DecorationImage(
-                                image: NetworkImage(otherPhoto),
+                                image: getImageProvider(otherPhoto),
                                 fit: BoxFit.cover,
                               )
                             : null,

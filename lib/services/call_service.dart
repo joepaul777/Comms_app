@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'package:uuid/uuid.dart';
 import '../models/call_model.dart';
@@ -19,6 +20,16 @@ class CallService {
   StreamSubscription? _callSubscription;
   StreamSubscription? _callerCandidatesSubscription;
   StreamSubscription? _receiverCandidatesSubscription;
+
+  // Guard against re-entrant cleanup
+  bool _isCleaningUp = false;
+
+  // Track call connection time for duration
+  DateTime? _connectedAt;
+
+  // ICE connection timeout
+  Timer? _iceTimeoutTimer;
+  static const _iceTimeoutDuration = Duration(seconds: 30);
 
   // Callbacks
   Function(MediaStream)? onLocalStream;
@@ -64,6 +75,11 @@ class CallService {
     required String receiverPhoto,
     required CallType type,
   }) async {
+    // Reset state for new call
+    _isCleaningUp = false;
+    _connectedAt = null;
+    _currentStatus = CallStatus.ringing;
+
     final callId = _uuid.v4();
 
     final call = CallModel(
@@ -112,6 +128,9 @@ class CallService {
     // Listen for receiver's ICE candidates
     _listenForRemoteCandidates(callId, 'receiverCandidates');
 
+    // Start ICE connection timeout
+    _startIceTimeout(callId);
+
     // Listen for the answer from the receiver
     _callSubscription = _firestore
         .collection('calls')
@@ -145,12 +164,37 @@ class CallService {
   }
 
   void _updateStatus(CallStatus status) {
+    if (_currentStatus == status) return;
     _currentStatus = status;
+
+    if (status == CallStatus.connected) {
+      _connectedAt = DateTime.now();
+      _iceTimeoutTimer?.cancel();
+    }
+
     onCallStatusChanged?.call(status);
+  }
+
+  /// Start a timer that marks the call as missed if no connection within timeout
+  void _startIceTimeout(String callId) {
+    _iceTimeoutTimer?.cancel();
+    _iceTimeoutTimer = Timer(_iceTimeoutDuration, () {
+      if (_currentStatus == CallStatus.ringing) {
+        debugPrint('ICE timeout — marking call as missed');
+        _firestore.collection('calls').doc(callId).update({
+          'status': CallStatus.missed.name,
+        });
+        _cleanup();
+      }
+    });
   }
 
   /// Answer a call (receiver side)
   Future<void> answerCall(String callId, bool isVideo) async {
+    _isCleaningUp = false;
+    _connectedAt = null;
+    _currentStatus = CallStatus.ringing;
+
     await _initializeWebRTC(isVideo);
 
     // Collect ICE candidates and send to 'receiverCandidates' subcollection
@@ -253,6 +297,11 @@ class CallService {
       _peerConnection!.addTrack(track, _localStream!);
     });
 
+    // Set max bitrate on video senders for equal quality on both sides
+    if (enableVideo) {
+      _setVideoBitrate();
+    }
+
     _peerConnection!.onTrack = (RTCTrackEvent event) {
       if (event.streams.isNotEmpty) {
         _remoteStream = event.streams[0];
@@ -271,19 +320,67 @@ class CallService {
     };
   }
 
-  /// End the call
+  /// Cap video bitrate so both sides get equal quality
+  Future<void> _setVideoBitrate() async {
+    try {
+      final senders = await _peerConnection!.getSenders();
+      for (final sender in senders) {
+        if (sender.track?.kind == 'video') {
+          final params = sender.parameters;
+          if (params.encodings == null || params.encodings!.isEmpty) {
+            params.encodings = [RTCRtpEncoding()];
+          }
+          for (final encoding in params.encodings!) {
+            encoding.maxBitrate = 1500000; // 1.5 Mbps
+            encoding.minBitrate = 500000;  // 500 kbps
+          }
+          await sender.setParameters(params);
+        }
+      }
+    } catch (e) {
+      debugPrint('Error setting video bitrate: $e');
+    }
+  }
+
+  /// End the call — with duration tracking
   Future<void> endCall(String callId) async {
-    await _firestore.collection('calls').doc(callId).update({
-      'status': CallStatus.ended.name,
-    });
+    if (_isCleaningUp) return;
+    _isCleaningUp = true;
+
+    // Calculate duration if the call was connected
+    int? duration;
+    if (_connectedAt != null) {
+      duration = DateTime.now().difference(_connectedAt!).inSeconds;
+    }
+
+    try {
+      final updateData = <String, dynamic>{
+        'status': CallStatus.ended.name,
+      };
+      if (duration != null) {
+        updateData['duration'] = duration;
+      }
+      await _firestore.collection('calls').doc(callId).update(updateData);
+    } catch (e) {
+      debugPrint('Error updating call status: $e');
+    }
+
     await _cleanup();
   }
 
   /// Reject an incoming call
   Future<void> rejectCall(String callId) async {
-    await _firestore.collection('calls').doc(callId).update({
-      'status': CallStatus.rejected.name,
-    });
+    if (_isCleaningUp) return;
+    _isCleaningUp = true;
+
+    try {
+      await _firestore.collection('calls').doc(callId).update({
+        'status': CallStatus.rejected.name,
+      });
+    } catch (e) {
+      debugPrint('Error rejecting call: $e');
+    }
+
     await _cleanup();
   }
 
@@ -304,7 +401,12 @@ class CallService {
         recipientFcmToken: fcmToken,
         title: isVideo ? '📹 Incoming Video Call' : '📞 Incoming Voice Call',
         message: '$callerName is calling you',
-        data: {'type': 'call', 'id': callId},
+        data: {
+          'type': 'call',
+          'id': callId,
+          'callerName': callerName,
+          'isVideo': isVideo.toString(),
+        },
       );
     } catch (_) {
       // Notification failure should never crash the call
@@ -377,7 +479,10 @@ class CallService {
   }
 
   Future<void> _cleanup() async {
-    _updateStatus(CallStatus.ended);
+    _iceTimeoutTimer?.cancel();
+    _iceTimeoutTimer = null;
+    _connectedAt = null;
+
     await _callSubscription?.cancel();
     await _callerCandidatesSubscription?.cancel();
     await _receiverCandidatesSubscription?.cancel();
@@ -391,9 +496,16 @@ class CallService {
     _remoteStream = null;
     await _peerConnection?.close();
     _peerConnection = null;
+
+    // Reset callbacks
+    onLocalStream = null;
+    onRemoteStream = null;
+    onCallStatusChanged = null;
   }
 
-  Future<void> dispose() async {
+  /// Clean up per-call resources (NOT the singleton itself)
+  Future<void> cleanupCall() async {
+    if (_isCleaningUp) return;
     await _cleanup();
   }
 }

@@ -28,10 +28,18 @@ class _VideoCallScreenState extends State<VideoCallScreen> {
   bool _isCameraOff = false;
   bool _isFrontCamera = true;
   bool _showControls = true;
+  bool _hasEnded = false;
   CallStatus _status = CallStatus.ringing;
   int _callDuration = 0;
   Timer? _timer;
   Timer? _hideControlsTimer;
+
+  // Draggable PiP position
+  double _pipX = -1; // -1 means not yet initialized
+  double _pipY = -1;
+  static const double _pipWidth = 110;
+  static const double _pipHeight = 155;
+  static const double _pipMargin = 16;
 
   @override
   void initState() {
@@ -70,14 +78,15 @@ class _VideoCallScreenState extends State<VideoCallScreen> {
     };
 
     _callService.onCallStatusChanged = (status) {
-      if (mounted) {
-        setState(() => _status = status);
-        if (status == CallStatus.connected) {
-          _startTimer();
-        } else if (status == CallStatus.ended ||
-            status == CallStatus.rejected) {
-          _endCall();
-        }
+      if (!mounted || _hasEnded) return;
+      setState(() => _status = status);
+      if (status == CallStatus.connected) {
+        _startTimer();
+      } else if (status == CallStatus.rejected) {
+        _handleRejected();
+      } else if (status == CallStatus.ended ||
+          status == CallStatus.missed) {
+        _handleEnded();
       }
     };
 
@@ -108,11 +117,46 @@ class _VideoCallScreenState extends State<VideoCallScreen> {
     return '$m:$s';
   }
 
+  void _handleRejected() {
+    if (_hasEnded) return;
+    _hasEnded = true;
+    _timer?.cancel();
+    _hideControlsTimer?.cancel();
+
+    if (mounted) {
+      setState(() => _status = CallStatus.rejected);
+    }
+
+    Future.delayed(const Duration(seconds: 2), () {
+      _callService.cleanupCall();
+      _disposeRenderers();
+      if (mounted) Navigator.pop(context);
+    });
+  }
+
+  void _handleEnded() {
+    if (_hasEnded) return;
+    _hasEnded = true;
+    _timer?.cancel();
+    _hideControlsTimer?.cancel();
+    _callService.cleanupCall();
+    _disposeRenderers();
+    if (mounted) Navigator.pop(context);
+  }
+
   Future<void> _endCall() async {
+    if (_hasEnded) return;
+    _hasEnded = true;
     _timer?.cancel();
     _hideControlsTimer?.cancel();
     await _callService.endCall(widget.call.id);
+    _disposeRenderers();
     if (mounted) Navigator.pop(context);
+  }
+
+  void _disposeRenderers() {
+    _localRenderer.srcObject = null;
+    _remoteRenderer.srcObject = null;
   }
 
   @override
@@ -121,16 +165,34 @@ class _VideoCallScreenState extends State<VideoCallScreen> {
     _hideControlsTimer?.cancel();
     _localRenderer.dispose();
     _remoteRenderer.dispose();
-    _callService.dispose();
+    // DON'T call _callService.dispose() — it's a singleton
     super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
     final isConnected = _status == CallStatus.connected;
+    final isRejected = _status == CallStatus.rejected;
     final otherName = widget.isIncoming
         ? widget.call.callerName
         : widget.call.receiverName;
+
+    // Initialize PiP position on first build
+    if (_pipX < 0) {
+      final screenWidth = MediaQuery.of(context).size.width;
+      final topPad = MediaQuery.of(context).padding.top;
+      _pipX = screenWidth - _pipWidth - _pipMargin;
+      _pipY = topPad + _pipMargin;
+    }
+
+    String statusText;
+    if (isRejected) {
+      statusText = 'Call Declined';
+    } else if (widget.isIncoming) {
+      statusText = 'Connecting...';
+    } else {
+      statusText = 'Calling...';
+    }
 
     return Scaffold(
       backgroundColor: Colors.black,
@@ -150,7 +212,7 @@ class _VideoCallScreenState extends State<VideoCallScreen> {
                 ),
               )
             else
-              // Waiting screen
+              // Waiting / Rejected screen
               Container(
                 width: double.infinity,
                 height: double.infinity,
@@ -165,7 +227,9 @@ class _VideoCallScreenState extends State<VideoCallScreen> {
                         color: AppColors.bgAlt,
                         shape: BoxShape.circle,
                         border: Border.all(
-                          color: AppColors.primary.withValues(alpha: 0.5),
+                          color: isRejected
+                              ? AppColors.error.withValues(alpha: 0.5)
+                              : AppColors.primary.withValues(alpha: 0.5),
                           width: 2,
                         ),
                       ),
@@ -177,7 +241,9 @@ class _VideoCallScreenState extends State<VideoCallScreen> {
                           style: GoogleFonts.outfit(
                             fontSize: 40,
                             fontWeight: FontWeight.w800,
-                            color: AppColors.primary,
+                            color: isRejected
+                                ? AppColors.error
+                                : AppColors.primary,
                           ),
                         ),
                       ),
@@ -193,26 +259,40 @@ class _VideoCallScreenState extends State<VideoCallScreen> {
                     ),
                     const SizedBox(height: 8),
                     Text(
-                      widget.isIncoming ? 'Connecting...' : 'Calling...',
+                      statusText,
                       style: GoogleFonts.inter(
                         fontSize: 16,
-                        color: AppColors.textMuted,
+                        color: isRejected
+                            ? AppColors.error
+                            : AppColors.textMuted,
                       ),
                     ),
                   ],
                 ),
               ),
 
-            // Local video (PiP)
+            // Local video (Draggable PiP)
             if (_localRenderer.srcObject != null)
               Positioned(
-                top: MediaQuery.of(context).padding.top + 16,
-                right: 16,
+                left: _pipX,
+                top: _pipY,
                 child: GestureDetector(
                   onTap: () {}, // Prevent parent tap
+                  onPanUpdate: (details) {
+                    setState(() {
+                      final screenSize = MediaQuery.of(context).size;
+                      _pipX = (_pipX + details.delta.dx)
+                          .clamp(0, screenSize.width - _pipWidth);
+                      _pipY = (_pipY + details.delta.dy)
+                          .clamp(
+                            MediaQuery.of(context).padding.top,
+                            screenSize.height - _pipHeight - _pipMargin,
+                          );
+                    });
+                  },
                   child: Container(
-                    width: 110,
-                    height: 155,
+                    width: _pipWidth,
+                    height: _pipHeight,
                     decoration: BoxDecoration(
                       borderRadius: BorderRadius.circular(16),
                       border: Border.all(
@@ -249,7 +329,7 @@ class _VideoCallScreenState extends State<VideoCallScreen> {
               ),
 
             // Top bar
-            if (_showControls)
+            if (_showControls && !isRejected)
               Positioned(
                 top: 0,
                 left: 0,
@@ -311,7 +391,7 @@ class _VideoCallScreenState extends State<VideoCallScreen> {
               ),
 
             // Bottom controls
-            if (_showControls)
+            if (_showControls && !isRejected)
               Positioned(
                 bottom: 0,
                 left: 0,

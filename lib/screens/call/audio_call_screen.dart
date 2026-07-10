@@ -27,6 +27,7 @@ class _AudioCallScreenState extends State<AudioCallScreen>
   CallStatus _status = CallStatus.ringing;
   int _callDuration = 0;
   Timer? _timer;
+  bool _hasEnded = false;
   late AnimationController _pulseController;
   late Animation<double> _pulseAnimation;
 
@@ -50,15 +51,16 @@ class _AudioCallScreenState extends State<AudioCallScreen>
     }
 
     _callService.onCallStatusChanged = (status) {
-      if (mounted) {
-        setState(() => _status = status);
-        if (status == CallStatus.connected) {
-          _startTimer();
-          _pulseController.stop();
-        } else if (status == CallStatus.ended ||
-            status == CallStatus.rejected) {
-          _endCall();
-        }
+      if (!mounted || _hasEnded) return;
+      setState(() => _status = status);
+      if (status == CallStatus.connected) {
+        _startTimer();
+        _pulseController.stop();
+      } else if (status == CallStatus.rejected) {
+        _handleRejected();
+      } else if (status == CallStatus.ended ||
+          status == CallStatus.missed) {
+        _handleEnded();
       }
     };
 
@@ -79,8 +81,40 @@ class _AudioCallScreenState extends State<AudioCallScreen>
     return '$m:$s';
   }
 
-  Future<void> _endCall() async {
+  /// Called when the OTHER side rejected the call
+  void _handleRejected() {
+    if (_hasEnded) return;
+    _hasEnded = true;
     _timer?.cancel();
+    _pulseController.stop();
+
+    // Show "Call Declined" briefly, then pop
+    if (mounted) {
+      setState(() => _status = CallStatus.rejected);
+    }
+
+    Future.delayed(const Duration(seconds: 2), () {
+      _callService.cleanupCall();
+      if (mounted) Navigator.pop(context);
+    });
+  }
+
+  /// Called when the call ends normally or due to timeout
+  void _handleEnded() {
+    if (_hasEnded) return;
+    _hasEnded = true;
+    _timer?.cancel();
+    _pulseController.stop();
+    _callService.cleanupCall();
+    if (mounted) Navigator.pop(context);
+  }
+
+  /// Called when the USER taps the end-call button
+  Future<void> _endCall() async {
+    if (_hasEnded) return;
+    _hasEnded = true;
+    _timer?.cancel();
+    _pulseController.stop();
     await _callService.endCall(widget.call.id);
     if (mounted) Navigator.pop(context);
   }
@@ -89,19 +123,33 @@ class _AudioCallScreenState extends State<AudioCallScreen>
   void dispose() {
     _timer?.cancel();
     _pulseController.dispose();
-    _callService.dispose();
+    // DON'T call _callService.dispose() — it's a singleton
     super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
     final isConnected = _status == CallStatus.connected;
+    final isRejected = _status == CallStatus.rejected;
     final otherName = widget.isIncoming
         ? widget.call.callerName
         : widget.call.receiverName;
     final otherPhoto = widget.isIncoming
         ? widget.call.callerPhoto
         : widget.call.receiverPhoto;
+
+    String statusText;
+    if (isConnected) {
+      statusText = _formatDuration(_callDuration);
+    } else if (isRejected) {
+      statusText = 'Call Declined';
+    } else if (_status == CallStatus.missed) {
+      statusText = 'No Answer';
+    } else if (_status == CallStatus.ringing) {
+      statusText = widget.isIncoming ? 'Incoming call...' : 'Calling...';
+    } else {
+      statusText = _status.name;
+    }
 
     return Scaffold(
       backgroundColor: AppColors.bg,
@@ -114,7 +162,9 @@ class _AudioCallScreenState extends State<AudioCallScreen>
               animation: _pulseAnimation,
               builder: (context, child) {
                 return Transform.scale(
-                  scale: isConnected ? 1.0 : _pulseAnimation.value,
+                  scale: isConnected || isRejected
+                      ? 1.0
+                      : _pulseAnimation.value,
                   child: child,
                 );
               },
@@ -125,14 +175,20 @@ class _AudioCallScreenState extends State<AudioCallScreen>
                   color: AppColors.bgAlt,
                   shape: BoxShape.circle,
                   border: Border.all(
-                    color: isConnected
-                        ? AppColors.online
-                        : AppColors.primary.withValues(alpha: 0.5),
+                    color: isRejected
+                        ? AppColors.error.withValues(alpha: 0.5)
+                        : isConnected
+                            ? AppColors.online
+                            : AppColors.primary.withValues(alpha: 0.5),
                     width: 3,
                   ),
                   boxShadow: [
                     BoxShadow(
-                      color: (isConnected ? AppColors.online : AppColors.primary)
+                      color: (isRejected
+                              ? AppColors.error
+                              : isConnected
+                                  ? AppColors.online
+                                  : AppColors.primary)
                           .withValues(alpha: 0.2),
                       blurRadius: 30,
                       spreadRadius: 5,
@@ -174,71 +230,72 @@ class _AudioCallScreenState extends State<AudioCallScreen>
             const SizedBox(height: 8),
             // Status
             Text(
-              isConnected
-                  ? _formatDuration(_callDuration)
-                  : _status == CallStatus.ringing
-                      ? (widget.isIncoming ? 'Incoming call...' : 'Calling...')
-                      : _status.name,
+              statusText,
               style: GoogleFonts.inter(
                 fontSize: 16,
-                color: isConnected ? AppColors.online : AppColors.textMuted,
+                color: isConnected
+                    ? AppColors.online
+                    : isRejected
+                        ? AppColors.error
+                        : AppColors.textMuted,
                 fontWeight: FontWeight.w500,
               ),
             ),
             const Spacer(flex: 3),
-            // Controls
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 40),
-              child: Row(
-                mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-                children: [
-                  _CallButton(
-                    icon: _isMuted ? Icons.mic_off_rounded : Icons.mic_rounded,
-                    label: _isMuted ? 'Unmute' : 'Mute',
-                    isActive: _isMuted,
-                    onTap: () {
-                      setState(() => _isMuted = !_isMuted);
-                      _callService.toggleMute(_isMuted);
-                    },
-                  ),
-                  _CallButton(
-                    icon: _isSpeaker
-                        ? Icons.volume_up_rounded
-                        : Icons.volume_down_rounded,
-                    label: 'Speaker',
-                    isActive: _isSpeaker,
-                    onTap: () {
-                      setState(() => _isSpeaker = !_isSpeaker);
-                      _callService.toggleSpeaker(_isSpeaker);
-                    },
-                  ),
-                  // End call button
-                  GestureDetector(
-                    onTap: _endCall,
-                    child: Container(
-                      width: 64,
-                      height: 64,
-                      decoration: BoxDecoration(
-                        color: AppColors.error,
-                        shape: BoxShape.circle,
-                        boxShadow: [
-                          BoxShadow(
-                            color: AppColors.error.withValues(alpha: 0.4),
-                            blurRadius: 16,
-                            spreadRadius: 2,
-                          ),
-                        ],
-                      ),
-                      child: const Icon(
-                        Icons.call_end_rounded,
-                        color: Colors.white,
-                        size: 28,
+            // Controls — hide if rejected
+            if (!isRejected)
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 40),
+                child: Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                  children: [
+                    _CallButton(
+                      icon: _isMuted ? Icons.mic_off_rounded : Icons.mic_rounded,
+                      label: _isMuted ? 'Unmute' : 'Mute',
+                      isActive: _isMuted,
+                      onTap: () {
+                        setState(() => _isMuted = !_isMuted);
+                        _callService.toggleMute(_isMuted);
+                      },
+                    ),
+                    _CallButton(
+                      icon: _isSpeaker
+                          ? Icons.volume_up_rounded
+                          : Icons.volume_down_rounded,
+                      label: 'Speaker',
+                      isActive: _isSpeaker,
+                      onTap: () {
+                        setState(() => _isSpeaker = !_isSpeaker);
+                        _callService.toggleSpeaker(_isSpeaker);
+                      },
+                    ),
+                    // End call button
+                    GestureDetector(
+                      onTap: _endCall,
+                      child: Container(
+                        width: 64,
+                        height: 64,
+                        decoration: BoxDecoration(
+                          color: AppColors.error,
+                          shape: BoxShape.circle,
+                          boxShadow: [
+                            BoxShadow(
+                              color: AppColors.error.withValues(alpha: 0.4),
+                              blurRadius: 16,
+                              spreadRadius: 2,
+                            ),
+                          ],
+                        ),
+                        child: const Icon(
+                          Icons.call_end_rounded,
+                          color: Colors.white,
+                          size: 28,
+                        ),
                       ),
                     ),
-                  ),
-                ],
+                  ],
+                ),
               ),
-            ),
             const SizedBox(height: 60),
           ],
         ),

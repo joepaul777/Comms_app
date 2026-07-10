@@ -110,6 +110,9 @@ class ChatService {
     required String senderName,
     required String text,
     MessageType type = MessageType.text,
+    String? replyToId,
+    String? replyToText,
+    String? replyToSenderName,
   }) async {
     final message = MessageModel(
       id: _uuid.v4(),
@@ -118,6 +121,9 @@ class ChatService {
       text: text,
       timestamp: DateTime.now(),
       type: type,
+      replyToId: replyToId,
+      replyToText: replyToText,
+      replyToSenderName: replyToSenderName,
     );
 
     final batch = _firestore.batch();

@@ -5,6 +5,7 @@ import '../../services/auth_service.dart';
 import '../../services/chat_service.dart';
 import '../../services/user_service.dart';
 import '../../services/call_service.dart';
+import '../../services/notification_service.dart';
 import '../../models/chat_room_model.dart';
 import '../../models/message_model.dart';
 import '../../models/user_model.dart';
@@ -33,6 +34,9 @@ class _ChatScreenState extends State<ChatScreen> {
   String? get _currentUid => _authService.currentUserId;
   UserModel? _currentUser;
 
+  // Reply state
+  MessageModel? _replyingTo;
+
   @override
   void initState() {
     super.initState();
@@ -40,6 +44,8 @@ class _ChatScreenState extends State<ChatScreen> {
     if (_currentUid != null) {
       _chatService.markMessagesAsRead(widget.chatRoom.id, _currentUid!);
     }
+    // Suppress notifications for this chat while viewing it
+    NotificationService.activeChatRoomId = widget.chatRoom.id;
   }
 
   Future<void> _loadCurrentUser() async {
@@ -50,6 +56,8 @@ class _ChatScreenState extends State<ChatScreen> {
 
   @override
   void dispose() {
+    // Clear active chat so notifications resume
+    NotificationService.activeChatRoomId = null;
     _messageController.dispose();
     _scrollController.dispose();
     super.dispose();
@@ -64,10 +72,22 @@ class _ChatScreenState extends State<ChatScreen> {
       senderId: _currentUid!,
       senderName: _currentUser?.name ?? 'You',
       text: text,
+      replyToId: _replyingTo?.id,
+      replyToText: _replyingTo?.text,
+      replyToSenderName: _replyingTo?.senderName,
     );
 
     _messageController.clear();
+    setState(() => _replyingTo = null);
     _scrollToBottom();
+  }
+
+  void _setReply(MessageModel message) {
+    setState(() => _replyingTo = message);
+  }
+
+  void _cancelReply() {
+    setState(() => _replyingTo = null);
   }
 
   void _scrollToBottom() {
@@ -126,70 +146,130 @@ class _ChatScreenState extends State<ChatScreen> {
         children: [
           // Messages
           Expanded(
-            child: StreamBuilder<List<MessageModel>>(
-              stream: _chatService.getMessages(widget.chatRoom.id),
-              builder: (context, snapshot) {
-                final messages = snapshot.data ?? [];
+            child: Stack(
+              children: [
+                // Subtle chat background pattern
+                const _ChatBackgroundPattern(),
+                // Messages list
+                StreamBuilder<List<MessageModel>>(
+                  stream: _chatService.getMessages(widget.chatRoom.id),
+                  builder: (context, snapshot) {
+                    final messages = snapshot.data ?? [];
 
-                if (messages.isEmpty) {
-                  return Center(
-                    child: Text(
-                      'Say hello! 👋',
-                      style: GoogleFonts.inter(
-                        fontSize: 16,
-                        color: AppColors.textMuted,
-                      ),
-                    ),
-                  );
-                }
-
-                WidgetsBinding.instance.addPostFrameCallback((_) {
-                  _scrollToBottom();
-                });
-
-                return ListView.builder(
-                  controller: _scrollController,
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 16,
-                    vertical: 8,
-                  ),
-                  itemCount: messages.length,
-                  itemBuilder: (context, index) {
-                    final message = messages[index];
-                    final isMine = message.senderId == _currentUid;
-                    final showSender = widget.chatRoom.isGroup &&
-                        !isMine &&
-                        message.type != MessageType.system;
-
-                    // Show date separator
-                    bool showDate = false;
-                    if (index == 0) {
-                      showDate = true;
-                    } else {
-                      final prevDate = messages[index - 1].timestamp;
-                      showDate = message.timestamp.day != prevDate.day;
+                    if (messages.isEmpty) {
+                      return Center(
+                        child: Text(
+                          'Say hello! 👋',
+                          style: GoogleFonts.inter(
+                            fontSize: 16,
+                            color: AppColors.textMuted,
+                          ),
+                        ),
+                      );
                     }
 
-                    return Column(
-                      children: [
-                        if (showDate) _DateSeparator(date: message.timestamp),
-                        if (message.type == MessageType.system)
-                          _SystemMessage(message: message)
-                        else
-                          _MessageBubble(
-                            message: message,
-                            isMine: isMine,
-                            showSender: showSender,
-                          ),
-                      ],
+                    WidgetsBinding.instance.addPostFrameCallback((_) {
+                      _scrollToBottom();
+                    });
+
+                    return ListView.builder(
+                      controller: _scrollController,
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 16,
+                        vertical: 8,
+                      ),
+                      itemCount: messages.length,
+                      itemBuilder: (context, index) {
+                        final message = messages[index];
+                        final isMine = message.senderId == _currentUid;
+                        final showSender = widget.chatRoom.isGroup &&
+                            !isMine &&
+                            message.type != MessageType.system;
+
+                        // Show date separator
+                        bool showDate = false;
+                        if (index == 0) {
+                          showDate = true;
+                        } else {
+                          final prevDate = messages[index - 1].timestamp;
+                          showDate = message.timestamp.day != prevDate.day;
+                        }
+
+                        return Column(
+                          children: [
+                            if (showDate) _DateSeparator(date: message.timestamp),
+                            if (message.type == MessageType.system)
+                              _SystemMessage(message: message)
+                            else
+                              _SwipeableMessageBubble(
+                                message: message,
+                                isMine: isMine,
+                                showSender: showSender,
+                                onSwipe: () => _setReply(message),
+                              ),
+                          ],
+                        );
+                      },
                     );
                   },
-                );
-              },
+                ),
+              ],
             ),
           ),
+          // Reply preview bar
+          if (_replyingTo != null) _buildReplyPreview(),
           // Input bar
           _buildInputBar(),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildReplyPreview() {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+      decoration: BoxDecoration(
+        color: AppColors.bgAlt,
+        border: Border(
+          top: BorderSide(color: AppColors.primary.withValues(alpha: 0.3), width: 1),
+          left: BorderSide(color: AppColors.primary, width: 3),
+        ),
+      ),
+      child: Row(
+        children: [
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(
+                  _replyingTo!.senderName,
+                  style: GoogleFonts.inter(
+                    fontSize: 12,
+                    fontWeight: FontWeight.w600,
+                    color: AppColors.primary,
+                  ),
+                ),
+                const SizedBox(height: 2),
+                Text(
+                  _replyingTo!.text,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: GoogleFonts.inter(
+                    fontSize: 13,
+                    color: AppColors.textMuted,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          GestureDetector(
+            onTap: _cancelReply,
+            child: const Padding(
+              padding: EdgeInsets.all(4),
+              child: Icon(Icons.close_rounded, size: 18, color: AppColors.textMuted),
+            ),
+          ),
         ],
       ),
     );
@@ -326,33 +406,51 @@ class _ChatScreenState extends State<ChatScreen> {
       child: Row(
         children: [
           Expanded(
-            child: Container(
-              padding: const EdgeInsets.symmetric(horizontal: 16),
-              decoration: BoxDecoration(
-                color: AppColors.bg,
-                borderRadius: BorderRadius.circular(24),
-                border: Border.all(color: AppColors.border),
-              ),
-              child: TextField(
-                controller: _messageController,
-                style: GoogleFonts.inter(
-                  fontSize: 14,
-                  color: AppColors.text,
-                ),
-                decoration: InputDecoration(
-                  hintText: 'Type a message...',
-                  hintStyle: GoogleFonts.inter(
-                    fontSize: 14,
-                    color: AppColors.textMuted,
-                  ),
+            child: Theme(
+              data: Theme.of(context).copyWith(
+                inputDecorationTheme: const InputDecorationTheme(
                   border: InputBorder.none,
-                  contentPadding: const EdgeInsets.symmetric(vertical: 12),
-                  filled: false,
+                  focusedBorder: InputBorder.none,
+                  enabledBorder: InputBorder.none,
+                  errorBorder: InputBorder.none,
+                  disabledBorder: InputBorder.none,
+                  focusColor: Colors.transparent,
                 ),
-                maxLines: 4,
-                minLines: 1,
-                textCapitalization: TextCapitalization.sentences,
-                onSubmitted: (_) => _sendMessage(),
+              ),
+              child: Container(
+                padding: const EdgeInsets.symmetric(horizontal: 16),
+                decoration: BoxDecoration(
+                  color: AppColors.bg,
+                  borderRadius: BorderRadius.circular(24),
+                  border: Border.all(color: AppColors.border),
+                ),
+                child: TextField(
+                  controller: _messageController,
+                  style: GoogleFonts.inter(
+                    fontSize: 14,
+                    color: AppColors.text,
+                  ),
+                  cursorColor: AppColors.primary,
+                  decoration: InputDecoration(
+                    hintText: 'Type a message...',
+                    hintStyle: GoogleFonts.inter(
+                      fontSize: 14,
+                      color: AppColors.textMuted,
+                    ),
+                    border: InputBorder.none,
+                    enabledBorder: InputBorder.none,
+                    focusedBorder: InputBorder.none,
+                    errorBorder: InputBorder.none,
+                    disabledBorder: InputBorder.none,
+                    contentPadding: const EdgeInsets.symmetric(vertical: 12),
+                    filled: false,
+                    isDense: true,
+                  ),
+                  maxLines: 4,
+                  minLines: 1,
+                  textCapitalization: TextCapitalization.sentences,
+                  onSubmitted: (_) => _sendMessage(),
+                ),
               ),
             ),
           ),
@@ -364,7 +462,7 @@ class _ChatScreenState extends State<ChatScreen> {
               height: 44,
               decoration: BoxDecoration(
                 gradient: AppColors.primaryGradient,
-                borderRadius: BorderRadius.circular(14),
+                borderRadius: BorderRadius.circular(22),
                 boxShadow: [
                   BoxShadow(
                     color: AppColors.primary.withValues(alpha: 0.3),
@@ -381,6 +479,47 @@ class _ChatScreenState extends State<ChatScreen> {
             ),
           ),
         ],
+      ),
+    );
+  }
+}
+
+/// Swipeable wrapper that triggers reply on right-swipe
+class _SwipeableMessageBubble extends StatelessWidget {
+  final MessageModel message;
+  final bool isMine;
+  final bool showSender;
+  final VoidCallback onSwipe;
+
+  const _SwipeableMessageBubble({
+    required this.message,
+    required this.isMine,
+    this.showSender = false,
+    required this.onSwipe,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Dismissible(
+      key: Key(message.id),
+      direction: DismissDirection.startToEnd,
+      confirmDismiss: (_) async {
+        onSwipe();
+        return false; // Don't actually dismiss
+      },
+      background: Container(
+        alignment: Alignment.centerLeft,
+        padding: const EdgeInsets.only(left: 20),
+        child: Icon(
+          Icons.reply_rounded,
+          color: AppColors.primary.withValues(alpha: 0.6),
+          size: 24,
+        ),
+      ),
+      child: _MessageBubble(
+        message: message,
+        isMine: isMine,
+        showSender: showSender,
       ),
     );
   }
@@ -406,6 +545,8 @@ class _MessageBubble extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final hasReply = message.replyToText != null && message.replyToText!.isNotEmpty;
+
     return Padding(
       padding: const EdgeInsets.only(bottom: 6),
       child: Row(
@@ -447,6 +588,44 @@ class _MessageBubble extends StatelessWidget {
                         fontWeight: FontWeight.w600,
                         color: AppColors.primary,
                       ),
+                    ),
+                  ),
+                // Reply quote
+                if (hasReply)
+                  Container(
+                    margin: const EdgeInsets.only(bottom: 6),
+                    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                    decoration: BoxDecoration(
+                      color: AppColors.bg.withValues(alpha: 0.5),
+                      borderRadius: BorderRadius.circular(8),
+                      border: Border(
+                        left: BorderSide(
+                          color: AppColors.primary.withValues(alpha: 0.6),
+                          width: 2,
+                        ),
+                      ),
+                    ),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          message.replyToSenderName ?? '',
+                          style: GoogleFonts.inter(
+                            fontSize: 11,
+                            fontWeight: FontWeight.w600,
+                            color: AppColors.primary,
+                          ),
+                        ),
+                        Text(
+                          message.replyToText ?? '',
+                          maxLines: 2,
+                          overflow: TextOverflow.ellipsis,
+                          style: GoogleFonts.inter(
+                            fontSize: 12,
+                            color: AppColors.textMuted,
+                          ),
+                        ),
+                      ],
                     ),
                   ),
                 Text(
@@ -546,4 +725,39 @@ class _DateSeparator extends StatelessWidget {
       ),
     );
   }
+}
+
+/// Subtle dot pattern background for the chat area
+class _ChatBackgroundPattern extends StatelessWidget {
+  const _ChatBackgroundPattern();
+
+  @override
+  Widget build(BuildContext context) {
+    return Positioned.fill(
+      child: CustomPaint(
+        painter: _DotPatternPainter(),
+      ),
+    );
+  }
+}
+
+class _DotPatternPainter extends CustomPainter {
+  @override
+  void paint(Canvas canvas, Size size) {
+    final paint = Paint()
+      ..color = AppColors.border.withValues(alpha: 0.15)
+      ..style = PaintingStyle.fill;
+
+    const spacing = 28.0;
+    const dotRadius = 1.0;
+
+    for (double x = spacing; x < size.width; x += spacing) {
+      for (double y = spacing; y < size.height; y += spacing) {
+        canvas.drawCircle(Offset(x, y), dotRadius, paint);
+      }
+    }
+  }
+
+  @override
+  bool shouldRepaint(covariant CustomPainter oldDelegate) => false;
 }

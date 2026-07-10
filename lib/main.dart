@@ -13,9 +13,6 @@ void main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await Firebase.initializeApp();
 
-  // Initialize notification service (FCM, local notifications)
-  await NotificationService().initialize();
-
   // Set system UI overlay style
   SystemChrome.setSystemUIOverlayStyle(
     const SystemUiOverlayStyle(
@@ -26,7 +23,11 @@ void main() async {
     ),
   );
 
+  // Launch app immediately — initialize notifications in the background
   runApp(const CommsApp());
+
+  // Initialize notification service in parallel (don't block startup)
+  NotificationService().initialize();
 }
 
 class CommsApp extends StatefulWidget {

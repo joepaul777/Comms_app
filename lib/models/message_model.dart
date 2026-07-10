@@ -7,6 +7,11 @@ class MessageModel {
   final bool isRead;
   final MessageType type;
 
+  // Reply fields
+  final String? replyToId;
+  final String? replyToText;
+  final String? replyToSenderName;
+
   MessageModel({
     required this.id,
     required this.senderId,
@@ -15,6 +20,9 @@ class MessageModel {
     required this.timestamp,
     this.isRead = false,
     this.type = MessageType.text,
+    this.replyToId,
+    this.replyToText,
+    this.replyToSenderName,
   });
 
   Map<String, dynamic> toMap() {
@@ -26,6 +34,9 @@ class MessageModel {
       'timestamp': timestamp.millisecondsSinceEpoch,
       'isRead': isRead,
       'type': type.name,
+      if (replyToId != null) 'replyToId': replyToId,
+      if (replyToText != null) 'replyToText': replyToText,
+      if (replyToSenderName != null) 'replyToSenderName': replyToSenderName,
     };
   }
 
@@ -43,6 +54,9 @@ class MessageModel {
         (e) => e.name == map['type'],
         orElse: () => MessageType.text,
       ),
+      replyToId: map['replyToId'],
+      replyToText: map['replyToText'],
+      replyToSenderName: map['replyToSenderName'],
     );
   }
 }

@@ -1,5 +1,4 @@
 import 'dart:io';
-import 'dart:convert';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
@@ -10,8 +9,43 @@ import 'fcm_sender_service.dart';
 /// Top-level background message handler (must be a top-level function)
 @pragma('vm:entry-point')
 Future<void> firebaseMessagingBackgroundHandler(RemoteMessage message) async {
-  // FCM shows the notification automatically when app is terminated/background.
-  // Nothing extra needed here for data-only messages.
+  // FCM shows the notification automatically when app is terminated/background
+  // for messages that contain a "notification" block.
+  // Data-only messages (like calls) won't show automatically, so we handle them here.
+  final data = message.data;
+  if (data['type'] == 'call') {
+    final callerName = data['callerName'] ?? 'Someone';
+    final isVideo = data['isVideo'] == 'true';
+    final callId = data['id'] ?? '';
+
+    final localNotifications = FlutterLocalNotificationsPlugin();
+    const androidInit = AndroidInitializationSettings('@mipmap/ic_launcher');
+    const iosInit = DarwinInitializationSettings();
+    const initSettings = InitializationSettings(android: androidInit, iOS: iosInit);
+    await localNotifications.initialize(initSettings);
+
+    localNotifications.show(
+      callId.hashCode,
+      isVideo ? 'Incoming Video Call' : 'Incoming Voice Call',
+      '$callerName is calling you',
+      const NotificationDetails(
+        android: AndroidNotificationDetails(
+          'comms_calls_channel',
+          'Incoming Calls',
+          importance: Importance.max,
+          priority: Priority.max,
+          icon: '@mipmap/ic_launcher',
+          fullScreenIntent: true,
+        ),
+        iOS: DarwinNotificationDetails(
+          presentAlert: true,
+          presentBadge: true,
+          presentSound: true,
+        ),
+      ),
+      payload: 'call:$callId',
+    );
+  }
 }
 
 class NotificationService {
@@ -23,9 +57,17 @@ class NotificationService {
   final FlutterLocalNotificationsPlugin _localNotifications =
       FlutterLocalNotificationsPlugin();
 
-  /// The channel ID used for all Comms notifications on Android
+  /// The channel ID used for message notifications on Android
   static const String _channelId = 'comms_channel';
   static const String _channelName = 'Comms Notifications';
+
+  /// Separate high-priority channel for incoming calls
+  static const String _callChannelId = 'comms_calls_channel';
+  static const String _callChannelName = 'Incoming Calls';
+
+  /// Set this to the currently active chat room ID to suppress notifications
+  /// for that chat while the user is viewing it.
+  static String? activeChatRoomId;
 
   /// Callback to navigate to a specific chat or incoming call screen.
   /// Set this from main.dart after routes are ready.
@@ -62,19 +104,32 @@ class NotificationService {
       },
     );
 
-    // Create Android notification channel
+    // Create Android notification channels
     if (Platform.isAndroid) {
-      const channel = AndroidNotificationChannel(
+      final androidPlugin = _localNotifications
+          .resolvePlatformSpecificImplementation<
+              AndroidFlutterLocalNotificationsPlugin>();
+
+      // Messages channel
+      const messageChannel = AndroidNotificationChannel(
         _channelId,
         _channelName,
-        description: 'Notifications for Comms messages and calls',
+        description: 'Notifications for Comms messages',
         importance: Importance.high,
         playSound: true,
       );
-      await _localNotifications
-          .resolvePlatformSpecificImplementation<
-              AndroidFlutterLocalNotificationsPlugin>()
-          ?.createNotificationChannel(channel);
+      await androidPlugin?.createNotificationChannel(messageChannel);
+
+      // Calls channel — max priority with full-screen intent
+      const callChannel = AndroidNotificationChannel(
+        _callChannelId,
+        _callChannelName,
+        description: 'Incoming call notifications',
+        importance: Importance.max,
+        playSound: true,
+        enableVibration: true,
+      );
+      await androidPlugin?.createNotificationChannel(callChannel);
     }
 
     // Handle foreground FCM messages
@@ -132,19 +187,32 @@ class NotificationService {
     final type = message.data['type'] ?? '';
     final id = message.data['id'] ?? '';
 
+    // Suppress notification if the user is currently viewing this chat
+    if (type == 'chat' && id == activeChatRoomId) {
+      return;
+    }
+
+    // Use the call channel for call notifications
+    final isCall = type == 'call';
+
     _localNotifications.show(
       notification.hashCode,
       notification.title,
       notification.body,
       NotificationDetails(
         android: AndroidNotificationDetails(
-          _channelId,
-          _channelName,
-          importance: Importance.high,
-          priority: Priority.high,
+          isCall ? _callChannelId : _channelId,
+          isCall ? _callChannelName : _channelName,
+          importance: isCall ? Importance.max : Importance.high,
+          priority: isCall ? Priority.max : Priority.high,
           icon: '@mipmap/ic_launcher',
+          fullScreenIntent: isCall,
         ),
-        iOS: const DarwinNotificationDetails(),
+        iOS: const DarwinNotificationDetails(
+          presentAlert: true,
+          presentBadge: true,
+          presentSound: true,
+        ),
       ),
       payload: '$type:$id',
     );
@@ -181,6 +249,9 @@ class NotificationService {
     required String messageText,
     required String chatRoomId,
   }) {
+    // Don't show if user is already viewing this chat
+    if (chatRoomId == activeChatRoomId) return;
+
     _localNotifications.show(
       chatRoomId.hashCode,
       senderName,
@@ -211,8 +282,8 @@ class NotificationService {
       '$callerName is calling you',
       NotificationDetails(
         android: AndroidNotificationDetails(
-          _channelId,
-          _channelName,
+          _callChannelId,
+          _callChannelName,
           importance: Importance.max,
           priority: Priority.max,
           icon: '@mipmap/ic_launcher',

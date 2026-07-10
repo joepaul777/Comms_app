@@ -36,8 +36,8 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     _authService.setOnlineStatus(true);
     _listenForIncomingCalls();
     
-    // Check for updates after the frame is built
-    WidgetsBinding.instance.addPostFrameCallback((_) {
+    // Check for updates after a short delay to not slow down startup
+    Future.delayed(const Duration(seconds: 2), () {
       if (mounted) {
         UpdateService.checkForUpdate(context);
       }
