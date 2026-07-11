@@ -2,6 +2,8 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'package:google_fonts/google_fonts.dart';
+import 'package:wakelock_plus/wakelock_plus.dart';
+import 'package:simple_pip_mode/simple_pip.dart';
 import '../../theme/app_colors.dart';
 import '../../services/call_service.dart';
 import '../../models/call_model.dart';
@@ -44,10 +46,19 @@ class _VideoCallScreenState extends State<VideoCallScreen> {
   @override
   void initState() {
     super.initState();
+    WakelockPlus.enable(); // Keep screen on during call
     _status = _callService.currentStatus;
     if (_status == CallStatus.connected) {
       _startTimer();
     }
+    
+    // Enable Auto PiP for Android 12+ (when pressing Home button)
+    SimplePip.isPipAvailable.then((available) {
+      if (available) {
+        SimplePip().setAutoPipMode(autoEnter: true);
+      }
+    });
+    
     _initRenderers();
   }
 
@@ -155,17 +166,17 @@ class _VideoCallScreenState extends State<VideoCallScreen> {
   }
 
   void _disposeRenderers() {
-    _localRenderer.srcObject = null;
-    _remoteRenderer.srcObject = null;
+    WakelockPlus.disable(); // Allow screen to turn off after call
+    _localRenderer.dispose();
+    _remoteRenderer.dispose();
   }
 
   @override
   void dispose() {
+    WakelockPlus.disable();
     _timer?.cancel();
     _hideControlsTimer?.cancel();
-    _localRenderer.dispose();
-    _remoteRenderer.dispose();
-    // DON'T call _callService.dispose() — it's a singleton
+    _disposeRenderers();
     super.dispose();
   }
 
@@ -194,15 +205,30 @@ class _VideoCallScreenState extends State<VideoCallScreen> {
       statusText = 'Calling...';
     }
 
-    return Scaffold(
-      backgroundColor: Colors.black,
-      body: GestureDetector(
-        onTap: () {
-          setState(() => _showControls = !_showControls);
-          if (_showControls) _startHideControlsTimer();
-        },
-        child: Stack(
-          children: [
+    return PopScope(
+      canPop: _hasEnded || !isConnected,
+      onPopInvokedWithResult: (didPop, result) async {
+        if (didPop) return;
+        
+        if (isConnected) {
+          final isPipAvailable = await SimplePip.isPipAvailable;
+          if (isPipAvailable) {
+            SimplePip().enterPipMode();
+            return;
+          }
+        }
+        
+        _endCall();
+      },
+      child: Scaffold(
+        backgroundColor: Colors.black,
+        body: GestureDetector(
+          onTap: () {
+            setState(() => _showControls = !_showControls);
+            if (_showControls) _startHideControlsTimer();
+          },
+          child: Stack(
+            children: [
             // Remote video (full screen)
             if (isConnected && _remoteRenderer.srcObject != null)
               Positioned.fill(
@@ -479,8 +505,9 @@ class _VideoCallScreenState extends State<VideoCallScreen> {
           ],
         ),
       ),
-    );
-  }
+    ),
+  );
+}
 }
 
 class _VideoCallButton extends StatelessWidget {

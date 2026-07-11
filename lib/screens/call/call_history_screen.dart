@@ -5,6 +5,7 @@ import '../../services/auth_service.dart';
 import '../../services/call_service.dart';
 import '../../models/call_model.dart';
 import '../../utils/image_utils.dart';
+import '../../widgets/full_screen_image_viewer.dart';
 
 class CallHistoryScreen extends StatefulWidget {
   const CallHistoryScreen({super.key});
@@ -115,33 +116,51 @@ class _CallHistoryScreenState extends State<CallHistoryScreen> {
                 child: Row(
                   children: [
                     // Avatar
-                    Container(
-                      width: 48,
-                      height: 48,
-                      decoration: BoxDecoration(
-                        color: AppColors.bgElevated,
-                        borderRadius: BorderRadius.circular(14),
-                        image: otherPhoto.isNotEmpty
-                            ? DecorationImage(
-                                image: getImageProvider(otherPhoto),
-                                fit: BoxFit.cover,
-                              )
-                            : null,
-                      ),
-                      child: otherPhoto.isEmpty
-                          ? Center(
-                              child: Text(
-                                otherName.isNotEmpty
-                                    ? otherName[0].toUpperCase()
-                                    : '?',
-                                style: GoogleFonts.outfit(
-                                  fontSize: 18,
-                                  fontWeight: FontWeight.w700,
-                                  color: AppColors.primary,
-                                ),
+                    GestureDetector(
+                      onTap: () {
+                        if (otherPhoto.isNotEmpty) {
+                          Navigator.push(
+                            context,
+                            MaterialPageRoute(
+                              builder: (_) => FullScreenImageViewer(
+                                imageProvider: getImageProvider(otherPhoto),
+                                heroTag: 'call_dp_${call.id}',
                               ),
-                            )
-                          : null,
+                            ),
+                          );
+                        }
+                      },
+                      child: Hero(
+                        tag: 'call_dp_${call.id}',
+                        child: Container(
+                          width: 48,
+                          height: 48,
+                          decoration: BoxDecoration(
+                            color: AppColors.bgElevated,
+                            borderRadius: BorderRadius.circular(14),
+                            image: otherPhoto.isNotEmpty
+                                ? DecorationImage(
+                                    image: getImageProvider(otherPhoto),
+                                    fit: BoxFit.cover,
+                                  )
+                                : null,
+                          ),
+                          child: otherPhoto.isEmpty
+                              ? Center(
+                                  child: Text(
+                                    otherName.isNotEmpty
+                                        ? otherName[0].toUpperCase()
+                                        : '?',
+                                    style: GoogleFonts.outfit(
+                                      fontSize: 18,
+                                      fontWeight: FontWeight.w700,
+                                      color: AppColors.primary,
+                                    ),
+                                  ),
+                                )
+                              : null,
+                        ),
+                      ),
                     ),
                     const SizedBox(width: 14),
                     // Info

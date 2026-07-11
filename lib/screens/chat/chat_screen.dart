@@ -1,4 +1,13 @@
 import 'package:flutter/material.dart';
+import 'dart:ui';
+import 'dart:io';
+import 'package:image_picker/image_picker.dart';
+import 'package:record/record.dart';
+import 'package:path_provider/path_provider.dart';
+import '../../services/media_service.dart';
+import '../../widgets/media_message_widget.dart';
+import '../../widgets/audio_message_widget.dart';
+
 import 'package:google_fonts/google_fonts.dart';
 import '../../theme/app_colors.dart';
 import '../../services/auth_service.dart';
@@ -24,6 +33,16 @@ class ChatScreen extends StatefulWidget {
 }
 
 class _ChatScreenState extends State<ChatScreen> {
+  // Media state
+  final MediaService _mediaService = MediaService();
+  final ImagePicker _imagePicker = ImagePicker();
+  
+  // Audio state
+  final AudioRecorder _audioRecorder = AudioRecorder();
+  bool _isRecording = false;
+  String? _recordingPath;
+  bool _isTextFieldEmpty = true;
+
   final ChatService _chatService = ChatService();
   final AuthService _authService = AuthService();
   final UserService _userService = UserService();
@@ -40,6 +59,11 @@ class _ChatScreenState extends State<ChatScreen> {
   @override
   void initState() {
     super.initState();
+    _messageController.addListener(() {
+      setState(() {
+        _isTextFieldEmpty = _messageController.text.trim().isEmpty;
+      });
+    });
     _loadCurrentUser();
     if (_currentUid != null) {
       _chatService.markMessagesAsRead(widget.chatRoom.id, _currentUid!);
@@ -58,9 +82,124 @@ class _ChatScreenState extends State<ChatScreen> {
   void dispose() {
     // Clear active chat so notifications resume
     NotificationService.activeChatRoomId = null;
+    _audioRecorder.dispose();
     _messageController.dispose();
     _scrollController.dispose();
     super.dispose();
+  }
+
+
+  Future<void> _startRecording() async {
+    if (await _audioRecorder.hasPermission()) {
+      final dir = await getApplicationDocumentsDirectory();
+      _recordingPath = '${dir.path}/audio_${DateTime.now().millisecondsSinceEpoch}.m4a';
+      await _audioRecorder.start(
+        const RecordConfig(),
+        path: _recordingPath!,
+      );
+      setState(() => _isRecording = true);
+    }
+  }
+
+  Future<void> _stopRecordingAndSend() async {
+    if (!_isRecording) return;
+    final path = await _audioRecorder.stop();
+    setState(() => _isRecording = false);
+    
+    if (path != null && _currentUid != null) {
+      final file = File(path);
+      final fileName = path.split('/').last;
+      
+      final downloadUrl = await _mediaService.uploadMedia(
+        file: file,
+        messageId: fileName,
+        fileName: fileName,
+      );
+      
+      if (downloadUrl != null) {
+        _chatService.sendMessage(
+          chatRoomId: widget.chatRoom.id,
+          senderId: _currentUid!,
+          senderName: _currentUser?.name ?? 'You',
+          text: 'Voice Message',
+          type: MessageType.audio,
+          mediaUrl: downloadUrl,
+          localFilePath: path,
+        );
+        _scrollToBottom();
+      }
+    }
+  }
+
+  Future<void> _pickMedia(ImageSource source, bool isVideo) async {
+    final XFile? pickedFile = isVideo 
+        ? await _imagePicker.pickVideo(source: source)
+        : await _imagePicker.pickImage(source: source, imageQuality: 70);
+
+    if (pickedFile != null && _currentUid != null) {
+      final file = File(pickedFile.path);
+      final fileName = pickedFile.name;
+      final type = isVideo ? MessageType.video : MessageType.image;
+      
+      final downloadUrl = await _mediaService.uploadMedia(
+        file: file,
+        messageId: fileName,
+        fileName: fileName,
+      );
+      
+      if (downloadUrl != null) {
+        _chatService.sendMessage(
+          chatRoomId: widget.chatRoom.id,
+          senderId: _currentUid!,
+          senderName: _currentUser?.name ?? 'You',
+          text: isVideo ? 'Video' : 'Image',
+          type: type,
+          mediaUrl: downloadUrl,
+          localFilePath: pickedFile.path,
+        );
+        _scrollToBottom();
+      }
+    }
+  }
+
+  void _showMediaBottomSheet() {
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: AppColors.bgAlt,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      ),
+      builder: (context) => SafeArea(
+        child: Wrap(
+          children: [
+            ListTile(
+              leading: const Icon(Icons.photo_library_rounded, color: AppColors.primary),
+              title: Text('Gallery', style: GoogleFonts.inter(color: AppColors.text)),
+              onTap: () {
+                Navigator.pop(context);
+                _pickMedia(ImageSource.gallery, false);
+              },
+            ),
+            ListTile(
+              leading: const Icon(Icons.camera_alt_rounded, color: AppColors.primary),
+              title: Text('Camera (Photo)', style: GoogleFonts.inter(color: AppColors.text)),
+              onTap: () {
+                Navigator.pop(context);
+                _pickMedia(ImageSource.camera, false);
+              },
+            ),
+            ListTile(
+              leading: const Icon(Icons.videocam_rounded, color: AppColors.primary),
+              title: Text('Camera (Video)', style: GoogleFonts.inter(color: AppColors.text)),
+              onTap: () {
+                Navigator.pop(context);
+                _pickMedia(ImageSource.camera, true);
+              },
+            ),
+          ],
+        ),
+      ),
+    );
   }
 
   void _sendMessage() {
@@ -278,8 +417,14 @@ class _ChatScreenState extends State<ChatScreen> {
   PreferredSizeWidget _buildAppBar() {
     if (widget.chatRoom.isGroup) {
       return AppBar(
-        backgroundColor: AppColors.bg,
+        backgroundColor: AppColors.bg.withOpacity(0.75),
         elevation: 0,
+        flexibleSpace: ClipRect(
+          child: BackdropFilter(
+            filter: ImageFilter.blur(sigmaX: 15, sigmaY: 15),
+            child: Container(color: Colors.transparent),
+          ),
+        ),
         leading: IconButton(
           icon: const Icon(Icons.arrow_back_rounded, color: AppColors.text),
           onPressed: () => Navigator.pop(context),
@@ -309,8 +454,14 @@ class _ChatScreenState extends State<ChatScreen> {
 
     final otherUserId = _getOtherUserId();
     return AppBar(
-      backgroundColor: AppColors.bg,
+      backgroundColor: AppColors.bg.withOpacity(0.75),
       elevation: 0,
+      flexibleSpace: ClipRect(
+        child: BackdropFilter(
+          filter: ImageFilter.blur(sigmaX: 15, sigmaY: 15),
+          child: Container(color: Colors.transparent),
+        ),
+      ),
       leading: IconButton(
         icon: const Icon(Icons.arrow_back_rounded, color: AppColors.text),
         onPressed: () => Navigator.pop(context),
@@ -390,95 +541,153 @@ class _ChatScreenState extends State<ChatScreen> {
   }
 
   Widget _buildInputBar() {
-    return Container(
-      padding: EdgeInsets.only(
-        left: 16,
-        right: 8,
-        top: 12,
-        bottom: MediaQuery.of(context).padding.bottom + 12,
-      ),
-      decoration: const BoxDecoration(
-        color: AppColors.bgAlt,
-        border: Border(
-          top: BorderSide(color: AppColors.border, width: 0.5),
-        ),
-      ),
-      child: Row(
-        children: [
-          Expanded(
-            child: Theme(
-              data: Theme.of(context).copyWith(
-                inputDecorationTheme: const InputDecorationTheme(
-                  border: InputBorder.none,
-                  focusedBorder: InputBorder.none,
-                  enabledBorder: InputBorder.none,
-                  errorBorder: InputBorder.none,
-                  disabledBorder: InputBorder.none,
-                  focusColor: Colors.transparent,
-                ),
+    return ClipRect(
+      child: BackdropFilter(
+        filter: ImageFilter.blur(sigmaX: 10, sigmaY: 10),
+        child: Container(
+          padding: EdgeInsets.only(
+            left: 8,
+            right: 8,
+            top: 12,
+            bottom: MediaQuery.of(context).padding.bottom + 12,
+          ),
+          decoration: BoxDecoration(
+            color: AppColors.bgAlt.withOpacity(0.8),
+            border: const Border(
+              top: BorderSide(color: AppColors.border, width: 0.5),
+            ),
+          ),
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.end,
+            children: [
+              IconButton(
+                icon: const Icon(Icons.add_circle_outline_rounded, color: AppColors.primary),
+                onPressed: _showMediaBottomSheet,
               ),
-              child: Container(
-                padding: const EdgeInsets.symmetric(horizontal: 16),
-                decoration: BoxDecoration(
-                  color: AppColors.bg,
-                  borderRadius: BorderRadius.circular(24),
-                  border: Border.all(color: AppColors.border),
-                ),
-                child: TextField(
-                  controller: _messageController,
-                  style: GoogleFonts.inter(
-                    fontSize: 14,
-                    color: AppColors.text,
-                  ),
-                  cursorColor: AppColors.primary,
-                  decoration: InputDecoration(
-                    hintText: 'Type a message...',
-                    hintStyle: GoogleFonts.inter(
-                      fontSize: 14,
-                      color: AppColors.textMuted,
+              Expanded(
+                child: Theme(
+                  data: Theme.of(context).copyWith(
+                    inputDecorationTheme: const InputDecorationTheme(
+                      border: InputBorder.none,
+                      focusedBorder: InputBorder.none,
+                      enabledBorder: InputBorder.none,
+                      errorBorder: InputBorder.none,
+                      disabledBorder: InputBorder.none,
+                      focusColor: Colors.transparent,
                     ),
-                    border: InputBorder.none,
-                    enabledBorder: InputBorder.none,
-                    focusedBorder: InputBorder.none,
-                    errorBorder: InputBorder.none,
-                    disabledBorder: InputBorder.none,
-                    contentPadding: const EdgeInsets.symmetric(vertical: 12),
-                    filled: false,
-                    isDense: true,
                   ),
-                  maxLines: 4,
-                  minLines: 1,
-                  textCapitalization: TextCapitalization.sentences,
-                  onSubmitted: (_) => _sendMessage(),
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 16),
+                    decoration: BoxDecoration(
+                      color: AppColors.bg,
+                      borderRadius: BorderRadius.circular(24),
+                      border: Border.all(color: AppColors.border),
+                    ),
+                    child: TextField(
+                      controller: _messageController,
+                      style: GoogleFonts.inter(
+                        fontSize: 14,
+                        color: AppColors.text,
+                      ),
+                      cursorColor: AppColors.primary,
+                      decoration: InputDecoration(
+                        hintText: _isRecording ? 'Recording audio...' : 'Type a message...',
+                        hintStyle: GoogleFonts.inter(
+                          fontSize: 14,
+                          color: _isRecording ? AppColors.error : AppColors.textMuted,
+                        ),
+                        border: InputBorder.none,
+                        enabledBorder: InputBorder.none,
+                        focusedBorder: InputBorder.none,
+                        errorBorder: InputBorder.none,
+                        disabledBorder: InputBorder.none,
+                        contentPadding: const EdgeInsets.symmetric(vertical: 12),
+                        filled: false,
+                        isDense: true,
+                      ),
+                      maxLines: 4,
+                      minLines: 1,
+                      textCapitalization: TextCapitalization.sentences,
+                      onSubmitted: (_) => _sendMessage(),
+                      readOnly: _isRecording,
+                      contentInsertionConfiguration: ContentInsertionConfiguration(
+                        onContentInserted: (KeyboardInsertedContent content) async {
+                          if (content.data != null && _currentUid != null) {
+                            final dir = await getTemporaryDirectory();
+                            final file = File('${dir.path}/gif_${DateTime.now().millisecondsSinceEpoch}.gif');
+                            await file.writeAsBytes(content.data!);
+                            final fileName = file.path.split('/').last;
+                            final downloadUrl = await _mediaService.uploadMedia(
+                              file: file,
+                              messageId: fileName,
+                              fileName: fileName,
+                            );
+                            if (downloadUrl != null) {
+                              _chatService.sendMessage(
+                                chatRoomId: widget.chatRoom.id,
+                                senderId: _currentUid!,
+                                senderName: _currentUser?.name ?? 'You',
+                                text: 'GIF',
+                                type: MessageType.gif,
+                                mediaUrl: downloadUrl,
+                                localFilePath: file.path,
+                              );
+                              _scrollToBottom();
+                            }
+                          }
+                        },
+                        allowedMimeTypes: const <String>['image/gif', 'image/png'],
+                      ),
+                    ),
+                  ),
                 ),
               ),
-            ),
-          ),
-          const SizedBox(width: 8),
-          GestureDetector(
-            onTap: _sendMessage,
-            child: Container(
-              width: 44,
-              height: 44,
-              decoration: BoxDecoration(
-                gradient: AppColors.primaryGradient,
-                borderRadius: BorderRadius.circular(22),
-                boxShadow: [
-                  BoxShadow(
-                    color: AppColors.primary.withValues(alpha: 0.3),
-                    blurRadius: 8,
-                    offset: const Offset(0, 2),
+              const SizedBox(width: 8),
+              GestureDetector(
+                onTap: () {
+                  if (!_isTextFieldEmpty) {
+                    _sendMessage();
+                  } else {
+                    if (_isRecording) {
+                      _stopRecordingAndSend();
+                    } else {
+                      _startRecording();
+                    }
+                  }
+                },
+                onLongPressStart: (_) {
+                  if (_isTextFieldEmpty) _startRecording();
+                },
+                onLongPressEnd: (_) {
+                  if (_isTextFieldEmpty) _stopRecordingAndSend();
+                },
+                child: AnimatedContainer(
+                  duration: const Duration(milliseconds: 200),
+                  width: _isRecording ? 52 : 44,
+                  height: _isRecording ? 52 : 44,
+                  margin: EdgeInsets.only(bottom: _isRecording ? 0 : 2),
+                  decoration: BoxDecoration(
+                    color: _isRecording ? AppColors.error : Colors.transparent,
+                    gradient: _isRecording ? null : AppColors.primaryGradient,
+                    shape: BoxShape.circle,
+                    boxShadow: [
+                      BoxShadow(
+                        color: (_isRecording ? AppColors.error : AppColors.primary).withOpacity(0.3),
+                        blurRadius: 8,
+                        offset: const Offset(0, 2),
+                      ),
+                    ],
                   ),
-                ],
+                  child: Icon(
+                    _isTextFieldEmpty ? Icons.mic_rounded : Icons.send_rounded,
+                    color: _isRecording ? Colors.white : AppColors.textDark,
+                    size: _isRecording ? 24 : 20,
+                  ),
+                ),
               ),
-              child: const Icon(
-                Icons.send_rounded,
-                color: AppColors.textDark,
-                size: 20,
-              ),
-            ),
+            ],
           ),
-        ],
+        ),
       ),
     );
   }
@@ -535,6 +744,23 @@ class _MessageBubble extends StatelessWidget {
     required this.isMine,
     this.showSender = false,
   });
+
+  Widget _buildMessageContent(BuildContext context) {
+    if (message.type == MessageType.image || message.type == MessageType.video || message.type == MessageType.gif) {
+      return MediaMessageWidget(message: message, isMine: isMine);
+    } else if (message.type == MessageType.audio) {
+      return AudioMessageWidget(message: message, isMine: isMine);
+    }
+    
+    return Text(
+      message.text,
+      style: GoogleFonts.inter(
+        fontSize: 14,
+        color: isMine ? AppColors.textDark : AppColors.text,
+        height: 1.4,
+      ),
+    );
+  }
 
   String _formatTime(DateTime time) {
     final hour = time.hour > 12 ? time.hour - 12 : (time.hour == 0 ? 12 : time.hour);
@@ -628,14 +854,7 @@ class _MessageBubble extends StatelessWidget {
                       ],
                     ),
                   ),
-                Text(
-                  message.text,
-                  style: GoogleFonts.inter(
-                    fontSize: 14,
-                    color: AppColors.text,
-                    height: 1.4,
-                  ),
-                ),
+                _buildMessageContent(context),
                 const SizedBox(height: 4),
                 Text(
                   _formatTime(message.timestamp),

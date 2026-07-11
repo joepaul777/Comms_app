@@ -109,21 +109,28 @@ class ChatService {
     required String senderId,
     required String senderName,
     required String text,
-    MessageType type = MessageType.text,
     String? replyToId,
     String? replyToText,
     String? replyToSenderName,
+    MessageType type = MessageType.text,
+    String? mediaUrl,
+    String? localFilePath,
   }) async {
+    final messageId = const Uuid().v4();
+    final timestamp = DateTime.now();
+
     final message = MessageModel(
-      id: _uuid.v4(),
+      id: messageId,
       senderId: senderId,
       senderName: senderName,
       text: text,
-      timestamp: DateTime.now(),
+      timestamp: timestamp,
       type: type,
       replyToId: replyToId,
       replyToText: replyToText,
       replyToSenderName: replyToSenderName,
+      mediaUrl: mediaUrl,
+      localFilePath: localFilePath,
     );
 
     final batch = _firestore.batch();
@@ -156,7 +163,18 @@ class ChatService {
       senderId: senderId,
       senderName: senderName,
       text: text,
+      type: type,
     );
+  }
+
+  // Delete a message
+  Future<void> deleteMessage(String chatRoomId, String messageId) async {
+    await _firestore
+        .collection('chatRooms')
+        .doc(chatRoomId)
+        .collection('messages')
+        .doc(messageId)
+        .delete();
   }
 
   /// Look up each participant's FCM token and send them a push notification
@@ -165,6 +183,7 @@ class ChatService {
     required String senderId,
     required String senderName,
     required String text,
+    required MessageType type,
   }) async {
     try {
       final chatRoomDoc =
@@ -178,7 +197,13 @@ class ChatService {
       final isGroup = chatRoom.isGroup;
       final chatName =
           isGroup ? (chatRoom.groupName ?? 'Group Chat') : senderName;
-      final body = isGroup ? '$senderName: $text' : text;
+      
+      String body = text;
+      if (type == MessageType.image) body = '📷 Photo';
+      if (type == MessageType.video) body = '📹 Video';
+      if (type == MessageType.audio) body = '🎤 Voice Message';
+      if (type == MessageType.gif) body = '👾 GIF';
+      if (isGroup) body = '$senderName: $body';
 
       for (final uid in recipients) {
         final userDoc = await _firestore.collection('users').doc(uid).get();

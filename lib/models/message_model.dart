@@ -12,6 +12,10 @@ class MessageModel {
   final String? replyToText;
   final String? replyToSenderName;
 
+  // Media fields
+  final String? mediaUrl;
+  final String? localFilePath;
+
   MessageModel({
     required this.id,
     required this.senderId,
@@ -23,6 +27,8 @@ class MessageModel {
     this.replyToId,
     this.replyToText,
     this.replyToSenderName,
+    this.mediaUrl,
+    this.localFilePath,
   });
 
   Map<String, dynamic> toMap() {
@@ -37,6 +43,8 @@ class MessageModel {
       if (replyToId != null) 'replyToId': replyToId,
       if (replyToText != null) 'replyToText': replyToText,
       if (replyToSenderName != null) 'replyToSenderName': replyToSenderName,
+      if (mediaUrl != null) 'mediaUrl': mediaUrl,
+      if (localFilePath != null) 'localFilePath': localFilePath,
     };
   }
 
@@ -57,6 +65,8 @@ class MessageModel {
       replyToId: map['replyToId'],
       replyToText: map['replyToText'],
       replyToSenderName: map['replyToSenderName'],
+      mediaUrl: map['mediaUrl'],
+      localFilePath: map['localFilePath'],
     );
   }
 }
@@ -64,5 +74,8 @@ class MessageModel {
 enum MessageType {
   text,
   image,
+  video,
+  audio,
+  gif,
   system,
 }

@@ -9,6 +9,7 @@ import '../../models/user_model.dart';
 import '../../utils/image_utils.dart';
 import 'chat_screen.dart';
 import 'create_group_screen.dart';
+import 'offline_lobby_screen.dart';
 
 class ChatListScreen extends StatefulWidget {
   const ChatListScreen({super.key});
@@ -41,6 +42,16 @@ class _ChatListScreenState extends State<ChatListScreen> {
           ),
         ),
         actions: [
+          IconButton(
+            icon: const Icon(Icons.radar_rounded, color: AppColors.primary),
+            onPressed: () {
+              Navigator.of(context).push(
+                MaterialPageRoute(
+                  builder: (_) => const OfflineLobbyScreen(),
+                ),
+              );
+            },
+          ),
           IconButton(
             icon: const Icon(Icons.group_add_rounded, color: AppColors.primary),
             onPressed: () {

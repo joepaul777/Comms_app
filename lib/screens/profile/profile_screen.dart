@@ -3,6 +3,7 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:image_picker/image_picker.dart';
+import 'package:image_cropper/image_cropper.dart';
 import '../../theme/app_colors.dart';
 import '../../services/auth_service.dart';
 import '../../services/user_service.dart';
@@ -77,17 +78,43 @@ class _ProfileScreenState extends State<ProfileScreen> {
     final picker = ImagePicker();
     final pickedFile = await picker.pickImage(
       source: ImageSource.gallery,
-      maxWidth: 256,
-      maxHeight: 256,
-      imageQuality: 50,
     );
 
     if (pickedFile != null) {
-      final currentUid = _authService.currentUserId;
-      if (currentUid == null) return;
-      final bytes = await File(pickedFile.path).readAsBytes();
-      final base64String = 'data:image/jpeg;base64,${base64Encode(bytes)}';
-      await _userService.updateUserProfile(uid: currentUid, photoUrl: base64String);
+      // Crop image to a square
+      final croppedFile = await ImageCropper().cropImage(
+        sourcePath: pickedFile.path,
+        aspectRatio: const CropAspectRatio(ratioX: 1, ratioY: 1),
+        compressQuality: 70,
+        maxWidth: 512,
+        maxHeight: 512,
+        uiSettings: [
+          AndroidUiSettings(
+            toolbarTitle: 'Crop Photo',
+            toolbarColor: AppColors.bg,
+            toolbarWidgetColor: AppColors.primary,
+            initAspectRatio: CropAspectRatioPreset.square,
+            lockAspectRatio: true,
+            backgroundColor: AppColors.bg,
+            dimmedLayerColor: Colors.black54,
+            cropFrameColor: AppColors.primary,
+            cropGridColor: AppColors.primary.withValues(alpha: 0.5),
+          ),
+          IOSUiSettings(
+            title: 'Crop Photo',
+            aspectRatioLockEnabled: true,
+            resetButtonHidden: true,
+          ),
+        ],
+      );
+
+      if (croppedFile != null) {
+        final currentUid = _authService.currentUserId;
+        if (currentUid == null) return;
+        final bytes = await File(croppedFile.path).readAsBytes();
+        final base64String = 'data:image/jpeg;base64,${base64Encode(bytes)}';
+        await _userService.updateUserProfile(uid: currentUid, photoUrl: base64String);
+      }
     }
   }
 

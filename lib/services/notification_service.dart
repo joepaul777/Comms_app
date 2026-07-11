@@ -6,9 +6,13 @@ import 'package:flutter/material.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'fcm_sender_service.dart';
 
+import 'package:firebase_core/firebase_core.dart';
+
 /// Top-level background message handler (must be a top-level function)
 @pragma('vm:entry-point')
 Future<void> firebaseMessagingBackgroundHandler(RemoteMessage message) async {
+  WidgetsFlutterBinding.ensureInitialized();
+  await Firebase.initializeApp();
   // FCM shows the notification automatically when app is terminated/background
   // for messages that contain a "notification" block.
   // Data-only messages (like calls) won't show automatically, so we handle them here.
@@ -24,19 +28,38 @@ Future<void> firebaseMessagingBackgroundHandler(RemoteMessage message) async {
     const initSettings = InitializationSettings(android: androidInit, iOS: iosInit);
     await localNotifications.initialize(initSettings);
 
+    const androidPlatformChannelSpecifics = AndroidNotificationDetails(
+      'comms_calls_channel_v3', // increment channel ID again to force Android to apply new settings
+      'Incoming Calls',
+      channelDescription: 'Used for incoming video and audio calls',
+      importance: Importance.max,
+      priority: Priority.max,
+      icon: '@mipmap/ic_launcher',
+      fullScreenIntent: true,
+      category: AndroidNotificationCategory.call,
+      autoCancel: false,
+      ongoing: true,
+    );
+
+    // Explicitly create the channel in background to ensure it exists
+    final androidPlugin = localNotifications.resolvePlatformSpecificImplementation<AndroidFlutterLocalNotificationsPlugin>();
+    if (androidPlugin != null) {
+      await androidPlugin.createNotificationChannel(
+        const AndroidNotificationChannel(
+          'comms_calls_channel_v3',
+          'Incoming Calls',
+          description: 'Used for incoming video and audio calls',
+          importance: Importance.max,
+        ),
+      );
+    }
+
     localNotifications.show(
       callId.hashCode,
       isVideo ? 'Incoming Video Call' : 'Incoming Voice Call',
       '$callerName is calling you',
       const NotificationDetails(
-        android: AndroidNotificationDetails(
-          'comms_calls_channel',
-          'Incoming Calls',
-          importance: Importance.max,
-          priority: Priority.max,
-          icon: '@mipmap/ic_launcher',
-          fullScreenIntent: true,
-        ),
+        android: androidPlatformChannelSpecifics,
         iOS: DarwinNotificationDetails(
           presentAlert: true,
           presentBadge: true,
@@ -62,7 +85,7 @@ class NotificationService {
   static const String _channelName = 'Comms Notifications';
 
   /// Separate high-priority channel for incoming calls
-  static const String _callChannelId = 'comms_calls_channel';
+  static const String _callChannelId = 'comms_calls_channel_v3';
   static const String _callChannelName = 'Incoming Calls';
 
   /// Set this to the currently active chat room ID to suppress notifications
@@ -184,11 +207,11 @@ class NotificationService {
     final notification = message.notification;
     if (notification == null) return;
 
-    final type = message.data['type'] ?? '';
-    final id = message.data['id'] ?? '';
+    final type = message.data['type']?.toString() ?? '';
+    final id = message.data['id']?.toString() ?? '';
 
     // Suppress notification if the user is currently viewing this chat
-    if (type == 'chat' && id == activeChatRoomId) {
+    if (type == 'chat' && id == activeChatRoomId?.toString()) {
       return;
     }
 
