@@ -7,13 +7,18 @@ class MessageModel {
   final bool isRead;
   final MessageType type;
 
-  // Reply fields
+  // Reply
   final String? replyToId;
   final String? replyToText;
   final String? replyToSenderName;
 
-  // Media fields
+  // Media (the link is temporary; each phone keeps its own copy)
   final String? mediaUrl;
+  final String? mediaName;
+  final int? mediaSize;
+  final int? durationMs;
+
+  /// Only used by the offline (nearby) chat, which never leaves the device.
   final String? localFilePath;
 
   MessageModel({
@@ -28,8 +33,16 @@ class MessageModel {
     this.replyToText,
     this.replyToSenderName,
     this.mediaUrl,
+    this.mediaName,
+    this.mediaSize,
+    this.durationMs,
     this.localFilePath,
   });
+
+  bool get isMedia => type == MessageType.image || type == MessageType.video || type == MessageType.audio;
+
+  /// When the online copy of the media disappears.
+  DateTime get mediaExpiresAt => timestamp.add(const Duration(minutes: 60));
 
   Map<String, dynamic> toMap() {
     return {
@@ -44,6 +57,9 @@ class MessageModel {
       if (replyToText != null) 'replyToText': replyToText,
       if (replyToSenderName != null) 'replyToSenderName': replyToSenderName,
       if (mediaUrl != null) 'mediaUrl': mediaUrl,
+      if (mediaName != null) 'mediaName': mediaName,
+      if (mediaSize != null) 'mediaSize': mediaSize,
+      if (durationMs != null) 'durationMs': durationMs,
       if (localFilePath != null) 'localFilePath': localFilePath,
     };
   }
@@ -54,7 +70,7 @@ class MessageModel {
       senderId: map['senderId'] ?? '',
       senderName: map['senderName'] ?? '',
       text: map['text'] ?? '',
-      timestamp: map['timestamp'] != null
+      timestamp: map['timestamp'] is int
           ? DateTime.fromMillisecondsSinceEpoch(map['timestamp'])
           : DateTime.now(),
       isRead: map['isRead'] ?? false,
@@ -66,6 +82,9 @@ class MessageModel {
       replyToText: map['replyToText'],
       replyToSenderName: map['replyToSenderName'],
       mediaUrl: map['mediaUrl'],
+      mediaName: map['mediaName'],
+      mediaSize: (map['mediaSize'] as num?)?.toInt(),
+      durationMs: (map['durationMs'] as num?)?.toInt(),
       localFilePath: map['localFilePath'],
     );
   }

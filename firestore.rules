@@ -1,0 +1,152 @@
+rules_version = '2';
+
+// Comms 2.0 security rules.
+//  - Only signed-in users can use the database.
+//  - People only see chats they are in, and calls they are part of.
+//  - Sending is rate limited: a message has to be written together with an update
+//    to the sender's own user document, and that update is only allowed if the
+//    sender is not going faster than the limits below.
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function me() {
+      return request.auth.uid;
+    }
+
+    function unchanged(after, before, field) {
+      return after.get(field, null) == before.get(field, null);
+    }
+
+    // ---- Message limits: at least 0.7 s apart, at most 30 per minute ----
+    function messageRateOk(after, before) {
+      return unchanged(after, before, 'lastMessageAt')
+          ? (unchanged(after, before, 'msgWindowStart') && unchanged(after, before, 'msgWindowCount'))
+          : (after.lastMessageAt == request.time
+             && request.time > before.get('lastMessageAt', timestamp.value(0)) + duration.value(700, 'ms')
+             && (
+               // a new one-minute window starts
+               (after.msgWindowStart == request.time
+                && after.msgWindowCount == 1
+                && request.time > before.get('msgWindowStart', timestamp.value(0)) + duration.value(60, 's'))
+               ||
+               // still inside the current window
+               (unchanged(after, before, 'msgWindowStart')
+                && after.msgWindowCount == before.get('msgWindowCount', 0) + 1
+                && after.msgWindowCount <= 30)
+             ));
+    }
+
+    // ---- Call limits: at least 8 s apart, at most 6 per five minutes ----
+    function callRateOk(after, before) {
+      return unchanged(after, before, 'lastCallAt')
+          ? (unchanged(after, before, 'callWindowStart') && unchanged(after, before, 'callWindowCount'))
+          : (after.lastCallAt == request.time
+             && request.time > before.get('lastCallAt', timestamp.value(0)) + duration.value(8, 's')
+             && (
+               (after.callWindowStart == request.time
+                && after.callWindowCount == 1
+                && request.time > before.get('callWindowStart', timestamp.value(0)) + duration.value(300, 's'))
+               ||
+               (unchanged(after, before, 'callWindowStart')
+                && after.callWindowCount == before.get('callWindowCount', 0) + 1
+                && after.callWindowCount <= 6)
+             ));
+    }
+
+    match /users/{uid} {
+      allow read: if signedIn();
+      allow create: if signedIn() && me() == uid
+                    && request.resource.data.uid == uid
+                    && !('lastMessageAt' in request.resource.data)
+                    && !('lastCallAt' in request.resource.data);
+      allow update: if signedIn() && me() == uid
+                    && request.resource.data.uid == resource.data.uid
+                    && messageRateOk(request.resource.data, resource.data)
+                    && callRateOk(request.resource.data, resource.data);
+      allow delete: if false;
+
+      // Left over from version 1; only the owner may touch it.
+      match /contacts/{contactId} {
+        allow read, write: if signedIn() && me() == uid;
+      }
+    }
+
+    function room(roomId) {
+      return get(/databases/$(database)/documents/chatRooms/$(roomId)).data;
+    }
+
+    function inRoom(roomId) {
+      return me() in room(roomId).participants;
+    }
+
+    match /chatRooms/{roomId} {
+      allow read: if signedIn() && me() in resource.data.participants;
+      allow create: if signedIn()
+                    && me() in request.resource.data.participants
+                    && request.resource.data.participants.size() >= 2
+                    && request.resource.data.participants.size() <= 100
+                    && request.resource.data.id == roomId;
+      allow update: if signedIn()
+                    && me() in resource.data.participants
+                    && request.resource.data.id == resource.data.id
+                    && request.resource.data.type == resource.data.type
+                    // two-person chats always keep the same two people
+                    && (resource.data.type == 'group'
+                        || request.resource.data.participants == resource.data.participants);
+      allow delete: if signedIn()
+                    && me() in resource.data.participants
+                    && (resource.data.type != 'group' || resource.data.get('adminId', '') == me());
+
+      match /messages/{messageId} {
+        allow read: if signedIn() && inRoom(roomId);
+        allow create: if signedIn()
+                      && inRoom(roomId)
+                      && request.resource.data.senderId == me()
+                      && request.resource.data.id == messageId
+                      && request.resource.data.text is string
+                      && request.resource.data.text.size() <= 4000
+                      && request.resource.data.type in ['text', 'image', 'video', 'audio', 'gif', 'system']
+                      // written in the same batch as the sender's rate-limit update
+                      && getAfter(/databases/$(database)/documents/users/$(me())).data.lastMessageAt == request.time;
+        // only "seen" style changes, by people in the chat
+        allow update: if signedIn() && inRoom(roomId)
+                      && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['isRead', 'readBy']);
+        // your own messages; in a two-person chat either person can clear the whole chat;
+        // in a group the admin can.
+        allow delete: if signedIn() && inRoom(roomId)
+                      && (resource.data.senderId == me()
+                          || room(roomId).type == 'direct'
+                          || room(roomId).get('adminId', '') == me());
+      }
+    }
+
+    function inCall(data) {
+      return me() == data.callerId || me() == data.receiverId;
+    }
+
+    match /calls/{callId} {
+      allow read: if signedIn() && inCall(resource.data);
+      allow create: if signedIn()
+                    && request.resource.data.callerId == me()
+                    && request.resource.data.receiverId != me()
+                    && request.resource.data.id == callId
+                    && request.resource.data.status in ['ringing', 'missed']
+                    && getAfter(/databases/$(database)/documents/users/$(me())).data.lastCallAt == request.time;
+      allow update: if signedIn() && inCall(resource.data)
+                    && request.resource.data.callerId == resource.data.callerId
+                    && request.resource.data.receiverId == resource.data.receiverId
+                    && request.resource.data.id == resource.data.id;
+      allow delete: if false;
+
+      match /{side}/{candidateId} {
+        allow read, create: if signedIn()
+                            && side in ['callerCandidates', 'receiverCandidates']
+                            && inCall(get(/databases/$(database)/documents/calls/$(callId)).data);
+      }
+    }
+  }
+}

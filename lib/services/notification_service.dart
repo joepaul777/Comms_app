@@ -1,366 +1,315 @@
+import 'dart:async';
 import 'dart:io';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
+import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
-import 'fcm_sender_service.dart';
+import '../models/call_model.dart';
+import 'media_service.dart';
+import 'push_api.dart';
 
-import 'package:firebase_core/firebase_core.dart';
+const _messageChannel = AndroidNotificationChannel(
+  'comms_messages',
+  'Messages',
+  description: 'New chat messages',
+  importance: Importance.high,
+);
 
-/// Top-level background message handler (must be a top-level function)
+final _callChannel = AndroidNotificationChannel(
+  'comms_calls_v4',
+  'Incoming calls',
+  description: 'Rings when someone calls you',
+  importance: Importance.max,
+  sound: const UriAndroidNotificationSound('content://settings/system/ringtone'),
+  enableVibration: true,
+  vibrationPattern: Int64List.fromList([0, 900, 600, 900, 600]),
+);
+
+const _missedChannel = AndroidNotificationChannel(
+  'comms_missed_calls',
+  'Missed calls',
+  description: 'Calls you did not answer',
+  importance: Importance.high,
+);
+
+/// What happened when a notification was tapped.
+class NotificationTap {
+  final String type; // chat, call
+  final String id;
+  final String action; // '', answer, decline
+  NotificationTap(this.type, this.id, this.action);
+}
+
+int callNotificationId(String callId) => callId.hashCode & 0x7fffffff;
+int chatNotificationId(String roomId) => roomId.hashCode & 0x7fffffff;
+
+final FlutterLocalNotificationsPlugin _plugin = FlutterLocalNotificationsPlugin();
+bool _pluginReady = false;
+
+Future<void> _initPlugin({DidReceiveNotificationResponseCallback? onTap}) async {
+  if (_pluginReady && onTap == null) return;
+  await _plugin.initialize(
+    const InitializationSettings(
+      android: AndroidInitializationSettings('@mipmap/ic_launcher'),
+      iOS: DarwinInitializationSettings(),
+    ),
+    onDidReceiveNotificationResponse: onTap,
+    onDidReceiveBackgroundNotificationResponse: notificationTapBackground,
+  );
+  final android = _plugin.resolvePlatformSpecificImplementation<AndroidFlutterLocalNotificationsPlugin>();
+  await android?.createNotificationChannel(_messageChannel);
+  await android?.createNotificationChannel(_callChannel);
+  await android?.createNotificationChannel(_missedChannel);
+  _pluginReady = true;
+}
+
+Future<void> _showChat(Map<String, dynamic> data) async {
+  final roomId = data['id'] as String? ?? '';
+  await _plugin.show(
+    chatNotificationId(roomId),
+    data['title'] as String? ?? 'Comms',
+    data['body'] as String? ?? 'New message',
+    NotificationDetails(
+      android: AndroidNotificationDetails(
+        _messageChannel.id,
+        _messageChannel.name,
+        importance: Importance.high,
+        priority: Priority.high,
+        icon: '@mipmap/ic_launcher',
+        color: const Color(0xFFFACC15),
+        category: AndroidNotificationCategory.message,
+      ),
+      iOS: const DarwinNotificationDetails(),
+    ),
+    payload: 'chat|$roomId',
+  );
+}
+
+Future<void> _showIncomingCall({required String callId, required String callerName, required bool isVideo}) async {
+  await _plugin.show(
+    callNotificationId(callId),
+    callerName,
+    isVideo ? 'Incoming video call' : 'Incoming voice call',
+    NotificationDetails(
+      android: AndroidNotificationDetails(
+        _callChannel.id,
+        _callChannel.name,
+        importance: Importance.max,
+        priority: Priority.max,
+        icon: '@mipmap/ic_launcher',
+        color: const Color(0xFFFACC15),
+        category: AndroidNotificationCategory.call,
+        fullScreenIntent: true,
+        ongoing: true,
+        autoCancel: false,
+        timeoutAfter: 40000,
+        // keep ringing until answered, declined or timed out
+        additionalFlags: Int32List.fromList([4]),
+        actions: const [
+          AndroidNotificationAction('decline', 'Decline', showsUserInterface: false, cancelNotification: true),
+          AndroidNotificationAction('answer', 'Answer', showsUserInterface: true, cancelNotification: true),
+        ],
+      ),
+      iOS: const DarwinNotificationDetails(presentSound: true),
+    ),
+    payload: 'call|$callId',
+  );
+}
+
+Future<void> _showMissedCall(String callId, String callerName, bool isVideo) async {
+  await _plugin.show(
+    callNotificationId('missed-$callId'),
+    'Missed ${isVideo ? 'video' : 'voice'} call',
+    callerName,
+    NotificationDetails(
+      android: AndroidNotificationDetails(
+        _missedChannel.id,
+        _missedChannel.name,
+        icon: '@mipmap/ic_launcher',
+        color: const Color(0xFFFACC15),
+        category: AndroidNotificationCategory.missedCall,
+      ),
+    ),
+    payload: 'calls|$callId',
+  );
+}
+
+/// Declines a ringing call without opening the app.
+Future<void> declineCallInBackground(String callId) async {
+  final user = FirebaseAuth.instance.currentUser ?? await FirebaseAuth.instance.authStateChanges().first;
+  if (user == null) return;
+  final ref = FirebaseFirestore.instance.collection('calls').doc(callId);
+  final declined = await FirebaseFirestore.instance.runTransaction<bool>((tx) async {
+    final snap = await tx.get(ref);
+    if (snap.data()?['status'] != CallStatus.ringing.name) return false;
+    tx.update(ref, {'status': CallStatus.rejected.name, 'endReason': EndReason.declined, 'endedBy': user.uid});
+    return true;
+  });
+  if (declined) await PushApi.callUpdate(callId);
+  try {
+    await FirebaseFirestore.instance.collection('users').doc(user.uid).update({'busyUntil': FieldValue.delete()});
+  } catch (_) {}
+}
+
+/// Runs in its own isolate when a push arrives and the app is not on screen.
 @pragma('vm:entry-point')
 Future<void> firebaseMessagingBackgroundHandler(RemoteMessage message) async {
   WidgetsFlutterBinding.ensureInitialized();
   await Firebase.initializeApp();
-  // FCM shows the notification automatically when app is terminated/background
-  // for messages that contain a "notification" block.
-  // Data-only messages (like calls) won't show automatically, so we handle them here.
+  await _initPlugin();
   final data = message.data;
-  if (data['type'] == 'call') {
-    final callerName = data['callerName'] ?? 'Someone';
-    final isVideo = data['isVideo'] == 'true';
-    final callId = data['id'] ?? '';
-
-    final localNotifications = FlutterLocalNotificationsPlugin();
-    const androidInit = AndroidInitializationSettings('@mipmap/ic_launcher');
-    const iosInit = DarwinInitializationSettings();
-    const initSettings = InitializationSettings(android: androidInit, iOS: iosInit);
-    await localNotifications.initialize(initSettings);
-
-    const androidPlatformChannelSpecifics = AndroidNotificationDetails(
-      'comms_calls_channel_v3', // increment channel ID again to force Android to apply new settings
-      'Incoming Calls',
-      channelDescription: 'Used for incoming video and audio calls',
-      importance: Importance.max,
-      priority: Priority.max,
-      icon: '@mipmap/ic_launcher',
-      fullScreenIntent: true,
-      category: AndroidNotificationCategory.call,
-      autoCancel: false,
-      ongoing: true,
-    );
-
-    // Explicitly create the channel in background to ensure it exists
-    final androidPlugin = localNotifications.resolvePlatformSpecificImplementation<AndroidFlutterLocalNotificationsPlugin>();
-    if (androidPlugin != null) {
-      await androidPlugin.createNotificationChannel(
-        const AndroidNotificationChannel(
-          'comms_calls_channel_v3',
-          'Incoming Calls',
-          description: 'Used for incoming video and audio calls',
-          importance: Importance.max,
-        ),
+  switch (data['type']) {
+    case 'chat':
+      await _showChat(data);
+      // Save the photo, video or voice note now, while the link still works.
+      await MediaService.prefetch(
+        url: data['mediaUrl'] ?? '',
+        messageId: data['messageId'] ?? '',
+        name: data['mediaName'] ?? '',
+        type: data['mediaType'] ?? '',
       );
-    }
-
-    localNotifications.show(
-      callId.hashCode,
-      isVideo ? 'Incoming Video Call' : 'Incoming Voice Call',
-      '$callerName is calling you',
-      const NotificationDetails(
-        android: androidPlatformChannelSpecifics,
-        iOS: DarwinNotificationDetails(
-          presentAlert: true,
-          presentBadge: true,
-          presentSound: true,
-        ),
-      ),
-      payload: 'call:$callId',
-    );
+      break;
+    case 'call':
+      final sentAt = int.tryParse(data['sentAt'] ?? '') ?? 0;
+      // A call that has already stopped ringing should not ring now.
+      if (DateTime.now().millisecondsSinceEpoch - sentAt > 38000) return;
+      await _showIncomingCall(callId: data['id'] ?? '', callerName: data['callerName'] ?? 'Someone', isVideo: data['isVideo'] == 'true');
+      break;
+    case 'call_update':
+      await _plugin.cancel(callNotificationId(data['id'] ?? ''));
+      if (data['missed'] == 'true') {
+        await _showMissedCall(data['id'] ?? '', data['callerName'] ?? 'Someone', data['isVideo'] == 'true');
+      }
+      break;
   }
 }
 
+/// Runs when the Decline button is pressed while the app is closed.
+@pragma('vm:entry-point')
+Future<void> notificationTapBackground(NotificationResponse response) async {
+  if (response.actionId != 'decline') return;
+  final parts = (response.payload ?? '').split('|');
+  if (parts.length < 2 || parts[0] != 'call') return;
+  WidgetsFlutterBinding.ensureInitialized();
+  await Firebase.initializeApp();
+  await declineCallInBackground(parts[1]);
+}
+
 class NotificationService {
-  static final NotificationService _instance = NotificationService._internal();
-  factory NotificationService() => _instance;
-  NotificationService._internal();
+  NotificationService._();
+  static final NotificationService instance = NotificationService._();
+  factory NotificationService() => instance;
 
   final FirebaseMessaging _messaging = FirebaseMessaging.instance;
-  final FlutterLocalNotificationsPlugin _localNotifications =
-      FlutterLocalNotificationsPlugin();
 
-  /// The channel ID used for message notifications on Android
-  static const String _channelId = 'comms_channel';
-  static const String _channelName = 'Comms Notifications';
-
-  /// Separate high-priority channel for incoming calls
-  static const String _callChannelId = 'comms_calls_channel_v3';
-  static const String _callChannelName = 'Incoming Calls';
-
-  /// Set this to the currently active chat room ID to suppress notifications
-  /// for that chat while the user is viewing it.
+  /// The chat on screen right now, so its messages don't pop up as notifications.
   static String? activeChatRoomId;
 
-  /// Callback to navigate to a specific chat or incoming call screen.
-  /// Set this from main.dart after routes are ready.
-  Function(String type, String id)? onNotificationTap;
+  final StreamController<NotificationTap> _taps = StreamController<NotificationTap>.broadcast();
+  NotificationTap? _pendingTap;
+
+  /// Taps on notifications. A tap that opened the app is replayed to the first listener.
+  Stream<NotificationTap> get taps => _taps.stream;
+
+  NotificationTap? takePendingTap() {
+    final tap = _pendingTap;
+    _pendingTap = null;
+    return tap;
+  }
+
+  /// Called by the app when a push for a chat arrives while it is open.
+  void Function(Map<String, dynamic> data)? onForegroundChat;
 
   Future<void> initialize() async {
-    // Register the background handler
     FirebaseMessaging.onBackgroundMessage(firebaseMessagingBackgroundHandler);
+    await _initPlugin(onTap: _onTap);
 
-    // Request notification permissions
-    await _messaging.requestPermission(
-      alert: true,
-      badge: true,
-      sound: true,
-    );
+    final launch = await _plugin.getNotificationAppLaunchDetails();
+    if (launch?.didNotificationLaunchApp == true && launch!.notificationResponse != null) {
+      _pendingTap = _parse(launch.notificationResponse!);
+    }
 
-    // Set up the local notification plugin
-    const androidInit = AndroidInitializationSettings('@mipmap/ic_launcher');
-    const iosInit = DarwinInitializationSettings();
-    const initSettings =
-        InitializationSettings(android: androidInit, iOS: iosInit);
-
-    await _localNotifications.initialize(
-      initSettings,
-      onDidReceiveNotificationResponse: (response) {
-        // Parse the payload to navigate to the right screen
-        final payload = response.payload;
-        if (payload != null) {
-          final parts = payload.split(':');
-          if (parts.length == 2) {
-            onNotificationTap?.call(parts[0], parts[1]);
-          }
-        }
-      },
-    );
-
-    // Create Android notification channels
+    await _messaging.requestPermission(alert: true, badge: true, sound: true);
     if (Platform.isAndroid) {
-      final androidPlugin = _localNotifications
-          .resolvePlatformSpecificImplementation<
-              AndroidFlutterLocalNotificationsPlugin>();
-
-      // Messages channel
-      const messageChannel = AndroidNotificationChannel(
-        _channelId,
-        _channelName,
-        description: 'Notifications for Comms messages',
-        importance: Importance.high,
-        playSound: true,
-      );
-      await androidPlugin?.createNotificationChannel(messageChannel);
-
-      // Calls channel — max priority with full-screen intent
-      const callChannel = AndroidNotificationChannel(
-        _callChannelId,
-        _callChannelName,
-        description: 'Incoming call notifications',
-        importance: Importance.max,
-        playSound: true,
-        enableVibration: true,
-      );
-      await androidPlugin?.createNotificationChannel(callChannel);
+      final android = _plugin.resolvePlatformSpecificImplementation<AndroidFlutterLocalNotificationsPlugin>();
+      try {
+        await android?.requestFullScreenIntentPermission();
+      } catch (_) {}
     }
 
-    // Handle foreground FCM messages
-    FirebaseMessaging.onMessage.listen((RemoteMessage message) {
-      _showLocalNotification(message);
+    FirebaseMessaging.onMessage.listen((message) {
+      final data = message.data;
+      if (data['type'] == 'chat') {
+        if (data['id'] != activeChatRoomId) {
+          _showChat(data);
+          onForegroundChat?.call(data);
+        }
+        MediaService.prefetch(
+          url: data['mediaUrl'] ?? '',
+          messageId: data['messageId'] ?? '',
+          name: data['mediaName'] ?? '',
+          type: data['mediaType'] ?? '',
+        );
+      } else if (data['type'] == 'call_update') {
+        _plugin.cancel(callNotificationId(data['id'] ?? ''));
+      }
+      // Calls are picked up directly from the database while the app is open.
     });
 
-    // Handle notification tap when app is in background (not terminated)
-    FirebaseMessaging.onMessageOpenedApp.listen((RemoteMessage message) {
-      _handleMessageTap(message);
-    });
-
-    // Handle notification tap when app was terminated
-    final initialMessage = await _messaging.getInitialMessage();
-    if (initialMessage != null) {
-      // Delay slightly to let the app finish initializing
-      Future.delayed(const Duration(milliseconds: 800), () {
-        _handleMessageTap(initialMessage);
-      });
-    }
-
-    // Save the FCM token for the current user
-    await _saveFcmToken();
-
-    // Refresh token if it changes (e.g., after reinstall)
-    _messaging.onTokenRefresh.listen((newToken) async {
-      await _updateTokenInFirestore(newToken);
-    });
+    _messaging.onTokenRefresh.listen(_saveToken);
+    await saveDeviceToken();
   }
 
-  /// Save the FCM token to Firestore so Cloud Functions can send notifications
-  Future<void> _saveFcmToken() async {
-    final user = FirebaseAuth.instance.currentUser;
-    if (user == null) return;
-    final token = await _messaging.getToken();
-    if (token != null) {
-      await _updateTokenInFirestore(token);
-    }
+  NotificationTap? _parse(NotificationResponse response) {
+    final parts = (response.payload ?? '').split('|');
+    if (parts.length < 2) return null;
+    return NotificationTap(parts[0], parts[1], response.actionId ?? '');
   }
 
-  Future<void> _updateTokenInFirestore(String token) async {
-    final user = FirebaseAuth.instance.currentUser;
-    if (user == null) return;
-    await FirebaseFirestore.instance
-        .collection('users')
-        .doc(user.uid)
-        .update({'fcmToken': token});
-  }
-
-  /// Show a local notification for foreground FCM messages
-  void _showLocalNotification(RemoteMessage message) {
-    final notification = message.notification;
-    if (notification == null) return;
-
-    final type = message.data['type']?.toString() ?? '';
-    final id = message.data['id']?.toString() ?? '';
-
-    // Suppress notification if the user is currently viewing this chat
-    if (type == 'chat' && id == activeChatRoomId?.toString()) {
+  void _onTap(NotificationResponse response) {
+    final tap = _parse(response);
+    if (tap == null) return;
+    if (tap.type == 'call' && tap.action == 'decline') {
+      declineCallInBackground(tap.id);
       return;
     }
-
-    // Use the call channel for call notifications
-    final isCall = type == 'call';
-
-    _localNotifications.show(
-      notification.hashCode,
-      notification.title,
-      notification.body,
-      NotificationDetails(
-        android: AndroidNotificationDetails(
-          isCall ? _callChannelId : _channelId,
-          isCall ? _callChannelName : _channelName,
-          importance: isCall ? Importance.max : Importance.high,
-          priority: isCall ? Priority.max : Priority.high,
-          icon: '@mipmap/ic_launcher',
-          fullScreenIntent: isCall,
-        ),
-        iOS: const DarwinNotificationDetails(
-          presentAlert: true,
-          presentBadge: true,
-          presentSound: true,
-        ),
-      ),
-      payload: '$type:$id',
-    );
-  }
-
-  /// Navigate to the correct screen when a notification is tapped
-  void _handleMessageTap(RemoteMessage message) {
-    final type = message.data['type'] ?? '';
-    final id = message.data['id'] ?? '';
-    if (type.isNotEmpty && id.isNotEmpty) {
-      onNotificationTap?.call(type, id);
+    if (_taps.hasListener) {
+      _taps.add(tap);
+    } else {
+      _pendingTap = tap;
     }
   }
 
-  /// Call this after a user signs in to save their FCM token
-  Future<void> onUserSignedIn() async {
-    await _saveFcmToken();
+  Future<void> saveDeviceToken() async {
+    try {
+      final token = await _messaging.getToken();
+      if (token != null) await _saveToken(token);
+    } catch (e) {
+      debugPrint('fcm token failed: $e');
+    }
   }
 
-  /// Call this after a user signs out to remove their token
-  Future<void> onUserSignedOut() async {
-    final user = FirebaseAuth.instance.currentUser;
-    if (user == null) return;
-    await FirebaseFirestore.instance
-        .collection('users')
-        .doc(user.uid)
-        .update({'fcmToken': FieldValue.delete()});
+  Future<void> _saveToken(String token) async {
+    final uid = FirebaseAuth.instance.currentUser?.uid;
+    if (uid == null) return;
+    await FirebaseFirestore.instance.collection('users').doc(uid).update({'fcmToken': token});
   }
 
-  /// Show a local notification when a new message is received while the app
-  /// is open (used as a fallback since FCM handles background/terminated).
-  void showMessageNotification({
-    required String senderName,
-    required String messageText,
-    required String chatRoomId,
-  }) {
-    // Don't show if user is already viewing this chat
-    if (chatRoomId == activeChatRoomId) return;
-
-    _localNotifications.show(
-      chatRoomId.hashCode,
-      senderName,
-      messageText,
-      NotificationDetails(
-        android: AndroidNotificationDetails(
-          _channelId,
-          _channelName,
-          importance: Importance.high,
-          priority: Priority.high,
-          icon: '@mipmap/ic_launcher',
-        ),
-        iOS: const DarwinNotificationDetails(),
-      ),
-      payload: 'chat:$chatRoomId',
-    );
+  Future<void> forgetDevice() async {
+    final uid = FirebaseAuth.instance.currentUser?.uid;
+    if (uid == null) return;
+    try {
+      await FirebaseFirestore.instance.collection('users').doc(uid).update({'fcmToken': FieldValue.delete()});
+      await _messaging.deleteToken();
+    } catch (_) {}
   }
 
-  /// Show a local notification for an incoming call
-  void showCallNotification({
-    required String callerName,
-    required String callId,
-    required bool isVideo,
-  }) {
-    _localNotifications.show(
-      callId.hashCode,
-      isVideo ? 'Incoming Video Call' : 'Incoming Voice Call',
-      '$callerName is calling you',
-      NotificationDetails(
-        android: AndroidNotificationDetails(
-          _callChannelId,
-          _callChannelName,
-          importance: Importance.max,
-          priority: Priority.max,
-          icon: '@mipmap/ic_launcher',
-          fullScreenIntent: true,
-        ),
-        iOS: const DarwinNotificationDetails(
-          presentAlert: true,
-          presentBadge: true,
-          presentSound: true,
-        ),
-      ),
-      payload: 'call:$callId',
-    );
-  }
+  Future<void> cancelCall(String callId) => _plugin.cancel(callNotificationId(callId));
 
-  /// Send a push notification securely using our embedded FcmSenderService.
-  /// Call this whenever a message is sent or a call is initiated.
-  static Future<void> sendPushNotification({
-    required String recipientFcmToken,
-    required String title,
-    required String message,
-    required Map<String, String> data,
-  }) async {
-    await FcmSenderService.sendPushNotification(
-      recipientFcmToken: recipientFcmToken,
-      title: title,
-      message: message,
-      data: data,
-    );
-  }
+  Future<void> cancelChat(String roomId) => _plugin.cancel(chatNotificationId(roomId));
 
-  /// Show a snackbar-style in-app notification banner
-  static void showInAppBanner(
-    BuildContext context, {
-    required String title,
-    required String body,
-  }) {
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text(
-              title,
-              style: const TextStyle(fontWeight: FontWeight.w700),
-            ),
-            Text(body),
-          ],
-        ),
-        duration: const Duration(seconds: 4),
-        behavior: SnackBarBehavior.floating,
-        backgroundColor: const Color(0xFF171717),
-      ),
-    );
-  }
+  Future<void> showMissedCall(CallModel call) => _showMissedCall(call.id, call.callerName, call.isVideo);
 }

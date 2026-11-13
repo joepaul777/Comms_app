@@ -1,159 +1,162 @@
-import 'dart:io';
-import 'package:flutter/material.dart';
-import 'package:google_fonts/google_fonts.dart';
+import 'dart:async';
 import 'package:audioplayers/audioplayers.dart';
-import '../../models/message_model.dart';
-import '../../services/media_service.dart';
-import '../../theme/app_colors.dart';
+import 'package:flutter/material.dart';
+import '../models/message_model.dart';
+import '../theme/app_colors.dart';
+import '../theme/app_theme.dart';
+import 'media_message_widget.dart';
+import 'ui.dart';
 
-class AudioMessageWidget extends StatefulWidget {
+/// A voice message: play/pause, a little waveform that fills as it plays, and the time.
+class AudioMessage extends StatefulWidget {
   final MessageModel message;
-  final bool isMine;
-
-  const AudioMessageWidget({super.key, required this.message, required this.isMine});
+  final bool mine;
+  const AudioMessage({super.key, required this.message, required this.mine});
 
   @override
-  State<AudioMessageWidget> createState() => _AudioMessageWidgetState();
+  State<AudioMessage> createState() => _AudioMessageState();
 }
 
-class _AudioMessageWidgetState extends State<AudioMessageWidget> {
-  final MediaService _mediaService = MediaService();
-  final AudioPlayer _audioPlayer = AudioPlayer();
-  
-  bool _isDownloading = false;
-  String? _localPath;
-  bool _isPlaying = false;
-  Duration _duration = Duration.zero;
+class _AudioMessageState extends State<AudioMessage> {
+  static _AudioMessageState? _playing; // only one voice message plays at a time
+  final AudioPlayer _player = AudioPlayer();
+  final List<StreamSubscription> _subs = [];
   Duration _position = Duration.zero;
+  Duration? _duration;
+  bool _isPlaying = false;
 
   @override
   void initState() {
     super.initState();
-    _localPath = widget.message.localFilePath;
-    _checkLocalFile();
-
-    _audioPlayer.onPlayerStateChanged.listen((state) {
-      if (mounted) {
-        setState(() => _isPlaying = state == PlayerState.playing);
-      }
-    });
-    _audioPlayer.onDurationChanged.listen((newDuration) {
-      if (mounted) setState(() => _duration = newDuration);
-    });
-    _audioPlayer.onPositionChanged.listen((newPosition) {
-      if (mounted) setState(() => _position = newPosition);
-    });
-  }
-
-  Future<void> _checkLocalFile() async {
-    if (_localPath != null) {
-      final file = File(_localPath!);
-      if (await file.exists()) {
-        await _audioPlayer.setSourceDeviceFile(_localPath!);
-        return;
-      }
-    }
-    setState(() => _localPath = null);
-  }
-
-  Future<void> _downloadMedia() async {
-    if (widget.message.mediaUrl == null) return;
-    setState(() => _isDownloading = true);
-    
-    final fileName = widget.message.mediaUrl!.split('%2F').last.split('?').first;
-    final path = await _mediaService.downloadMedia(
-      url: widget.message.mediaUrl!,
-      fileName: fileName,
-    );
-    
-    if (path != null) {
-      if (!widget.isMine) {
-         _mediaService.deleteMediaFromCloud(widget.message.id, fileName);
-      }
-      setState(() {
-        _localPath = path;
-        _isDownloading = false;
-      });
-      await _audioPlayer.setSourceDeviceFile(_localPath!);
-    } else {
-      setState(() => _isDownloading = false);
-    }
+    final ms = widget.message.durationMs;
+    if (ms != null) _duration = Duration(milliseconds: ms);
+    _subs.add(_player.onPositionChanged.listen((p) => setState(() => _position = p)));
+    _subs.add(_player.onDurationChanged.listen((d) => setState(() => _duration = d)));
+    _subs.add(_player.onPlayerStateChanged.listen((s) => setState(() => _isPlaying = s == PlayerState.playing)));
+    _subs.add(_player.onPlayerComplete.listen((_) => setState(() {
+          _position = Duration.zero;
+          _isPlaying = false;
+        })));
   }
 
   @override
   void dispose() {
-    _audioPlayer.dispose();
+    for (final s in _subs) {
+      s.cancel();
+    }
+    if (_playing == this) _playing = null;
+    _player.dispose();
     super.dispose();
   }
 
-  String _formatDuration(Duration d) {
-    String twoDigits(int n) => n.toString().padLeft(2, "0");
-    String twoDigitMinutes = twoDigits(d.inMinutes.remainder(60));
-    String twoDigitSeconds = twoDigits(d.inSeconds.remainder(60));
-    return "$twoDigitMinutes:$twoDigitSeconds";
+  Future<void> _toggle(String path) async {
+    if (_isPlaying) {
+      await _player.pause();
+      return;
+    }
+    if (_playing != null && _playing != this) await _playing!._player.pause();
+    _playing = this;
+    if (_position > Duration.zero) {
+      await _player.resume();
+    } else {
+      await _player.play(DeviceFileSource(path));
+    }
   }
 
   @override
   Widget build(BuildContext context) {
-    if (_localPath == null) {
-      return Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          _isDownloading
-              ? const SizedBox(
-                  width: 24,
-                  height: 24,
-                  child: CircularProgressIndicator(strokeWidth: 2, color: AppColors.primary),
-                )
-              : IconButton(
-                  icon: const Icon(Icons.download_rounded, color: AppColors.primary),
-                  onPressed: _downloadMedia,
+    final fg = widget.mine ? AppColors.textDark : AppColors.text;
+    final accent = widget.mine ? AppColors.textDark : AppColors.primary;
+    return MediaLoader(
+      message: widget.message,
+      builder: (context, file, progress, expired) {
+        final total = _duration ?? Duration.zero;
+        final fraction = total.inMilliseconds == 0 ? 0.0 : (_position.inMilliseconds / total.inMilliseconds).clamp(0.0, 1.0);
+        return SizedBox(
+          width: 230,
+          child: Row(
+            children: [
+              GestureDetector(
+                onTap: file == null ? null : () => _toggle(file.path),
+                child: Container(
+                  width: 40,
+                  height: 40,
+                  decoration: BoxDecoration(
+                    color: widget.mine ? AppColors.textDark.withValues(alpha: 0.12) : AppColors.primarySoft,
+                    shape: BoxShape.circle,
+                  ),
+                  child: file == null
+                      ? Padding(
+                          padding: const EdgeInsets.all(11),
+                          child: expired
+                              ? Icon(Icons.mic_off_rounded, size: 18, color: accent)
+                              : CircularProgressIndicator(strokeWidth: 2, color: accent, value: (progress ?? 0) > 0 ? progress : null),
+                        )
+                      : AnimatedSwitcher(
+                          duration: const Duration(milliseconds: 180),
+                          child: Icon(
+                            _isPlaying ? Icons.pause_rounded : Icons.play_arrow_rounded,
+                            key: ValueKey(_isPlaying),
+                            color: accent,
+                          ),
+                        ),
                 ),
-          const SizedBox(width: 8),
-          Text(
-            'Voice Message',
-            style: GoogleFonts.inter(fontSize: 14, color: AppColors.text),
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    _Waveform(seed: widget.message.id.hashCode, progress: fraction, color: fg),
+                    const SizedBox(height: 4),
+                    Text(
+                      expired && file == null
+                          ? 'Voice message expired'
+                          : formatDuration(_isPlaying || _position > Duration.zero ? _position : total),
+                      style: AppTheme.body(11.5, color: fg.withValues(alpha: 0.7)),
+                    ),
+                  ],
+                ),
+              ),
+            ],
           ),
-        ],
-      );
-    }
+        );
+      },
+    );
+  }
+}
 
-    return Row(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        IconButton(
-          icon: Icon(
-            _isPlaying ? Icons.pause_rounded : Icons.play_arrow_rounded,
-            color: widget.isMine ? AppColors.textDark : AppColors.primary,
-          ),
-          onPressed: () {
-            if (_isPlaying) {
-              _audioPlayer.pause();
-            } else {
-              _audioPlayer.resume();
-            }
-          },
-        ),
-        Expanded(
-          child: Slider(
-            value: _position.inSeconds.toDouble(),
-            max: _duration.inSeconds.toDouble() > 0 ? _duration.inSeconds.toDouble() : 1.0,
-            activeColor: widget.isMine ? AppColors.textDark : AppColors.primary,
-            inactiveColor: (widget.isMine ? AppColors.textDark : AppColors.primary).withOpacity(0.3),
-            onChanged: (val) {
-              _audioPlayer.seek(Duration(seconds: val.toInt()));
-            },
-          ),
-        ),
-        Text(
-          _formatDuration(_position.inSeconds > 0 ? _position : _duration),
-          style: GoogleFonts.inter(
-            fontSize: 12,
-            color: widget.isMine ? AppColors.textDark : AppColors.textMuted,
-          ),
-        ),
-        const SizedBox(width: 8),
-      ],
+class _Waveform extends StatelessWidget {
+  final int seed;
+  final double progress;
+  final Color color;
+  const _Waveform({required this.seed, required this.progress, required this.color});
+
+  @override
+  Widget build(BuildContext context) {
+    const bars = 28;
+    return SizedBox(
+      height: 24,
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.center,
+        children: List.generate(bars, (i) {
+          final h = 5 + ((seed >> (i % 16)) ^ (i * 7919)).abs() % 17;
+          final played = i / bars <= progress;
+          return Expanded(
+            child: Center(
+              child: AnimatedContainer(
+                duration: const Duration(milliseconds: 150),
+                width: 2.6,
+                height: h.toDouble(),
+                decoration: BoxDecoration(
+                  color: played ? color : color.withValues(alpha: 0.3),
+                  borderRadius: BorderRadius.circular(2),
+                ),
+              ),
+            ),
+          );
+        }),
+      ),
     );
   }
 }

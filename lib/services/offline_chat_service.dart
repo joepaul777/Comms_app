@@ -1,3 +1,4 @@
+import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'dart:convert';
 import 'dart:typed_data';
 import 'package:flutter/foundation.dart';
@@ -16,6 +17,7 @@ class OfflinePeer {
 }
 
 class OfflineChatService extends ChangeNotifier {
+  final FlutterLocalNotificationsPlugin _notificationsPlugin = FlutterLocalNotificationsPlugin();
   static final OfflineChatService _instance = OfflineChatService._internal();
   factory OfflineChatService() => _instance;
   OfflineChatService._internal();
@@ -35,6 +37,7 @@ class OfflineChatService extends ChangeNotifier {
 
   // In-memory messages for the current session (disappears on disconnect)
   List<MessageModel> messages = [];
+  bool isChatScreenOpen = false;
 
   // Initialize permissions
   Future<bool> requestPermissions() async {
@@ -181,10 +184,38 @@ class OfflineChatService extends ChangeNotifier {
         final message = MessageModel.fromMap(map);
         messages.insert(0, message); // Insert at 0 because ListView is reverse
         notifyListeners();
+        
+        if (!isChatScreenOpen) {
+          _showNotification(message.senderName, message.text);
+        }
       } catch (e) {
         print("Failed to decode offline message: $e");
       }
     }
+  }
+  
+  Future<void> _showNotification(String title, String body) async {
+    const AndroidNotificationDetails androidDetails = AndroidNotificationDetails(
+      'offline_channel_id',
+      'Offline Messages',
+      importance: Importance.max,
+      priority: Priority.high,
+    );
+    const NotificationDetails platformDetails = NotificationDetails(android: androidDetails);
+    
+    await _notificationsPlugin.show(
+      DateTime.now().millisecond,
+      title,
+      body,
+      platformDetails,
+    );
+  }
+
+  void stopDiscoveryOnly() {
+    Nearby().stopDiscovery();
+    isDiscovering = false;
+    discoveredPeers.clear();
+    notifyListeners();
   }
 
   void disconnect() {

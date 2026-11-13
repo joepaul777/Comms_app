@@ -1,7 +1,9 @@
+import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
-import '../../theme/app_colors.dart';
 import '../../services/auth_service.dart';
-import 'package:google_fonts/google_fonts.dart';
+import '../../theme/app_colors.dart';
+import '../../theme/app_theme.dart';
+import '../../widgets/ui.dart';
 
 class LoginScreen extends StatefulWidget {
   const LoginScreen({super.key});
@@ -10,290 +12,163 @@ class LoginScreen extends StatefulWidget {
   State<LoginScreen> createState() => _LoginScreenState();
 }
 
-class _LoginScreenState extends State<LoginScreen>
-    with TickerProviderStateMixin {
-  final AuthService _authService = AuthService();
-  bool _isLoading = false;
-  late AnimationController _fadeController;
-  late AnimationController _slideController;
-  late AnimationController _pulseController;
-  late Animation<double> _fadeAnimation;
-  late Animation<Offset> _slideAnimation;
-  late Animation<double> _pulseAnimation;
-
-  @override
-  void initState() {
-    super.initState();
-    _fadeController = AnimationController(
-      vsync: this,
-      duration: const Duration(milliseconds: 1200),
-    );
-    _slideController = AnimationController(
-      vsync: this,
-      duration: const Duration(milliseconds: 800),
-    );
-    _pulseController = AnimationController(
-      vsync: this,
-      duration: const Duration(milliseconds: 2000),
-    )..repeat(reverse: true);
-
-    _fadeAnimation = Tween<double>(begin: 0, end: 1).animate(
-      CurvedAnimation(parent: _fadeController, curve: Curves.easeOut),
-    );
-    _slideAnimation = Tween<Offset>(
-      begin: const Offset(0, 0.3),
-      end: Offset.zero,
-    ).animate(
-      CurvedAnimation(parent: _slideController, curve: Curves.easeOutCubic),
-    );
-    _pulseAnimation = Tween<double>(begin: 0.8, end: 1.0).animate(
-      CurvedAnimation(parent: _pulseController, curve: Curves.easeInOut),
-    );
-
-    _fadeController.forward();
-    Future.delayed(const Duration(milliseconds: 300), () {
-      _slideController.forward();
-    });
-  }
+class _LoginScreenState extends State<LoginScreen> with TickerProviderStateMixin {
+  late final AnimationController _intro = AnimationController(vsync: this, duration: const Duration(milliseconds: 1200))..forward();
+  late final AnimationController _float = AnimationController(vsync: this, duration: const Duration(seconds: 4))..repeat(reverse: true);
+  bool _busy = false;
 
   @override
   void dispose() {
-    _fadeController.dispose();
-    _slideController.dispose();
-    _pulseController.dispose();
+    _intro.dispose();
+    _float.dispose();
     super.dispose();
   }
 
-  Future<void> _signInWithGoogle() async {
-    setState(() => _isLoading = true);
+  Future<void> _signIn() async {
+    setState(() => _busy = true);
     try {
-      await _authService.signInWithGoogle();
-      // Navigation is handled by StreamBuilder in main.dart
+      await AuthService.instance.signInWithGoogle();
+    } on FirebaseAuthException catch (e) {
+      if (mounted) showSnack(context, e.message ?? 'Sign-in failed', error: true);
     } catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('Sign in failed: ${e.toString()}'),
-            backgroundColor: AppColors.error,
-          ),
-        );
-      }
+      if (mounted) showSnack(context, 'Sign-in failed. Check your connection and try again.', error: true);
     } finally {
-      if (mounted) setState(() => _isLoading = false);
+      if (mounted) setState(() => _busy = false);
     }
+  }
+
+  Animation<double> _step(double start, double end) =>
+      CurvedAnimation(parent: _intro, curve: Interval(start, end, curve: Curves.easeOutCubic));
+
+  Widget _reveal(double start, Widget child) {
+    final a = _step(start, (start + 0.5).clamp(0, 1));
+    return FadeTransition(
+      opacity: a,
+      child: SlideTransition(position: Tween(begin: const Offset(0, 0.25), end: Offset.zero).animate(a), child: child),
+    );
   }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      backgroundColor: AppColors.bg,
-      body: SafeArea(
-        child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 32),
-          child: Column(
-            children: [
-              const Spacer(flex: 2),
-              // Logo
-              FadeTransition(
-                opacity: _fadeAnimation,
-                child: AnimatedBuilder(
-                  animation: _pulseAnimation,
-                  builder: (context, child) {
-                    return Transform.scale(
-                      scale: _pulseAnimation.value,
-                      child: child,
-                    );
-                  },
-                  child: Container(
-                    width: 120,
-                    height: 120,
-                    decoration: BoxDecoration(
-                      color: AppColors.bgAlt,
-                      borderRadius: BorderRadius.circular(30),
-                      border: Border.all(
-                        color: AppColors.primary.withValues(alpha: 0.3),
-                        width: 2,
-                      ),
-                      boxShadow: [
-                        BoxShadow(
-                          color: AppColors.primary.withValues(alpha: 0.15),
-                          blurRadius: 40,
-                          spreadRadius: 5,
-                        ),
-                      ],
-                    ),
-                    child: Center(
-                      child: Text(
-                        'CO.',
-                        style: GoogleFonts.outfit(
-                          fontSize: 42,
-                          fontWeight: FontWeight.w800,
-                          color: AppColors.primary,
-                        ),
-                      ),
-                    ),
-                  ),
+      body: Stack(
+        children: [
+          // Soft drifting glow
+          AnimatedBuilder(
+            animation: _float,
+            builder: (_, _) => Positioned(
+              top: -120 + _float.value * 40,
+              right: -100 + _float.value * 30,
+              child: Container(
+                width: 360,
+                height: 360,
+                decoration: const BoxDecoration(
+                  shape: BoxShape.circle,
+                  gradient: RadialGradient(colors: [Color(0x40FACC15), Color(0x00FACC15)]),
                 ),
               ),
-              const SizedBox(height: 40),
-              // App Name
-              FadeTransition(
-                opacity: _fadeAnimation,
-                child: Text(
-                  'Comms',
-                  style: GoogleFonts.outfit(
-                    fontSize: 48,
-                    fontWeight: FontWeight.w800,
-                    color: AppColors.text,
-                    letterSpacing: -1,
-                  ),
-                ),
-              ),
-              const SizedBox(height: 12),
-              FadeTransition(
-                opacity: _fadeAnimation,
-                child: Text(
-                  'Stay connected with your people',
-                  style: GoogleFonts.inter(
-                    fontSize: 16,
-                    color: AppColors.textMuted,
-                    fontWeight: FontWeight.w400,
-                  ),
-                ),
-              ),
-              const Spacer(flex: 2),
-              // Sign In Button
-              SlideTransition(
-                position: _slideAnimation,
-                child: FadeTransition(
-                  opacity: _fadeAnimation,
-                  child: SizedBox(
-                    width: double.infinity,
-                    child: _isLoading
-                        ? Center(
-                            child: Container(
-                              width: 56,
-                              height: 56,
-                              decoration: BoxDecoration(
-                                color: AppColors.bgAlt,
-                                borderRadius: BorderRadius.circular(16),
-                                border: Border.all(
-                                  color: AppColors.border,
-                                ),
-                              ),
-                              child: const Center(
-                                child: SizedBox(
-                                  width: 24,
-                                  height: 24,
-                                  child: CircularProgressIndicator(
-                                    strokeWidth: 2.5,
-                                    color: AppColors.primary,
-                                  ),
-                                ),
-                              ),
-                            ),
-                          )
-                        : _GoogleSignInButton(onPressed: _signInWithGoogle),
-                  ),
-                ),
-              ),
-              const SizedBox(height: 24),
-              SlideTransition(
-                position: _slideAnimation,
-                child: FadeTransition(
-                  opacity: _fadeAnimation,
-                  child: Text(
-                    'Sign in to chat, call, and video call\nyour friends — all in one place.',
-                    textAlign: TextAlign.center,
-                    style: GoogleFonts.inter(
-                      fontSize: 13,
-                      color: AppColors.textMuted.withValues(alpha: 0.6),
-                      height: 1.5,
-                    ),
-                  ),
-                ),
-              ),
-              const Spacer(),
-            ],
+            ),
           ),
-        ),
+          SafeArea(
+            child: Center(
+              child: SingleChildScrollView(
+                padding: const EdgeInsets.all(28),
+                child: ConstrainedBox(
+                  constraints: const BoxConstraints(maxWidth: 420),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      _reveal(
+                        0,
+                        Container(
+                          width: 76,
+                          height: 76,
+                          decoration: BoxDecoration(color: AppColors.primary, borderRadius: BorderRadius.circular(24)),
+                          child: Center(child: Text('CO.', style: AppTheme.display(26, weight: FontWeight.w900, color: AppColors.textDark))),
+                        ),
+                      ),
+                      const SizedBox(height: 36),
+                      _reveal(0.15, Text('Talk to your\npeople.', style: AppTheme.display(44, weight: FontWeight.w900))),
+                      const SizedBox(height: 14),
+                      _reveal(
+                        0.3,
+                        Text('Chats, voice notes, photos, and crystal-clear voice and video calls. All in one place.',
+                            style: AppTheme.body(16, color: AppColors.textMuted, height: 1.5)),
+                      ),
+                      const SizedBox(height: 28),
+                      _reveal(
+                        0.4,
+                        Wrap(
+                          spacing: 8,
+                          runSpacing: 8,
+                          children: const [
+                            _Feature(icon: Icons.chat_bubble_rounded, label: 'Chat'),
+                            _Feature(icon: Icons.mic_rounded, label: 'Voice notes'),
+                            _Feature(icon: Icons.call_rounded, label: 'Calls'),
+                            _Feature(icon: Icons.videocam_rounded, label: 'Video'),
+                          ],
+                        ),
+                      ),
+                      const SizedBox(height: 44),
+                      _reveal(
+                        0.55,
+                        SizedBox(
+                          width: double.infinity,
+                          child: ElevatedButton(
+                            onPressed: _busy ? null : _signIn,
+                            style: ElevatedButton.styleFrom(minimumSize: const Size.fromHeight(58)),
+                            child: AnimatedSwitcher(
+                              duration: const Duration(milliseconds: 200),
+                              child: _busy
+                                  ? const SizedBox(width: 22, height: 22, child: CircularProgressIndicator(strokeWidth: 2.5, color: AppColors.textDark))
+                                  : Row(
+                                      mainAxisAlignment: MainAxisAlignment.center,
+                                      children: [
+                                        Container(
+                                          width: 26,
+                                          height: 26,
+                                          decoration: const BoxDecoration(color: Colors.white, shape: BoxShape.circle),
+                                          child: Center(child: Text('G', style: AppTheme.display(15, weight: FontWeight.w900, color: const Color(0xFF4285F4)))),
+                                        ),
+                                        const SizedBox(width: 12),
+                                        const Text('Continue with Google'),
+                                      ],
+                                    ),
+                            ),
+                          ),
+                        ),
+                      ),
+                      const SizedBox(height: 16),
+                      _reveal(0.65, Center(child: Text('Version 2.0', style: AppTheme.body(12.5, color: AppColors.textFaint)))),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ],
       ),
     );
   }
 }
 
-class _GoogleSignInButton extends StatefulWidget {
-  final VoidCallback onPressed;
-
-  const _GoogleSignInButton({required this.onPressed});
-
-  @override
-  State<_GoogleSignInButton> createState() => _GoogleSignInButtonState();
-}
-
-class _GoogleSignInButtonState extends State<_GoogleSignInButton> {
-  bool _isHovered = false;
+class _Feature extends StatelessWidget {
+  final IconData icon;
+  final String label;
+  const _Feature({required this.icon, required this.label});
 
   @override
   Widget build(BuildContext context) {
-    return GestureDetector(
-      onTapDown: (_) => setState(() => _isHovered = true),
-      onTapUp: (_) => setState(() => _isHovered = false),
-      onTapCancel: () => setState(() => _isHovered = false),
-      onTap: widget.onPressed,
-      child: AnimatedContainer(
-        duration: const Duration(milliseconds: 200),
-        padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 16),
-        decoration: BoxDecoration(
-          color: _isHovered ? AppColors.primary : AppColors.bgAlt,
-          borderRadius: BorderRadius.circular(16),
-          border: Border.all(
-            color: _isHovered ? AppColors.primary : AppColors.border,
-            width: 1.5,
-          ),
-          boxShadow: _isHovered
-              ? [
-                  BoxShadow(
-                    color: AppColors.primary.withValues(alpha: 0.3),
-                    blurRadius: 20,
-                    spreadRadius: 2,
-                  ),
-                ]
-              : [],
-        ),
-        child: Row(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            // Google Logo
-            Container(
-              width: 24,
-              height: 24,
-              decoration: BoxDecoration(
-                color: Colors.white,
-                borderRadius: BorderRadius.circular(4),
-              ),
-              child: Center(
-                child: Text(
-                  'G',
-                  style: GoogleFonts.outfit(
-                    fontSize: 16,
-                    fontWeight: FontWeight.w800,
-                    color: const Color(0xFF4285F4),
-                  ),
-                ),
-              ),
-            ),
-            const SizedBox(width: 14),
-            Text(
-              'Continue with Google',
-              style: GoogleFonts.inter(
-                fontSize: 16,
-                fontWeight: FontWeight.w600,
-                color: _isHovered ? AppColors.textDark : AppColors.text,
-              ),
-            ),
-          ],
-        ),
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+      decoration: BoxDecoration(color: AppColors.bgAlt, borderRadius: BorderRadius.circular(20), border: Border.all(color: AppColors.border)),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(icon, size: 16, color: AppColors.primary),
+          const SizedBox(width: 6),
+          Text(label, style: AppTheme.body(13, weight: FontWeight.w600)),
+        ],
       ),
     );
   }

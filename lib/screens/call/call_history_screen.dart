@@ -1,232 +1,159 @@
 import 'package:flutter/material.dart';
-import 'package:google_fonts/google_fonts.dart';
-import '../../theme/app_colors.dart';
-import '../../services/auth_service.dart';
-import '../../services/call_service.dart';
+import 'package:intl/intl.dart';
 import '../../models/call_model.dart';
-import '../../utils/image_utils.dart';
-import '../../widgets/full_screen_image_viewer.dart';
+import '../../models/user_model.dart';
+import '../../services/call_service.dart';
+import '../../services/user_service.dart';
+import '../../theme/app_colors.dart';
+import '../../theme/app_theme.dart';
+import '../../widgets/avatar.dart';
+import '../../widgets/ui.dart';
 
 class CallHistoryScreen extends StatefulWidget {
-  const CallHistoryScreen({super.key});
+  final UserModel me;
+  const CallHistoryScreen({super.key, required this.me});
 
   @override
   State<CallHistoryScreen> createState() => _CallHistoryScreenState();
 }
 
 class _CallHistoryScreenState extends State<CallHistoryScreen> {
-  final CallService _callService = CallService();
-  final AuthService _authService = AuthService();
+  late final Stream<List<CallModel>> _history = CallService.instance.history(widget.me.uid);
+  bool _missedOnly = false;
 
-  String _formatTime(DateTime time) {
-    final now = DateTime.now();
-    final diff = now.difference(time);
-    final hour = time.hour > 12 ? time.hour - 12 : (time.hour == 0 ? 12 : time.hour);
-    final period = time.hour >= 12 ? 'PM' : 'AM';
-    final minute = time.minute.toString().padLeft(2, '0');
-    final timeStr = '$hour:$minute $period';
+  bool _isMissed(CallModel c) =>
+      c.receiverId == widget.me.uid && (c.status == CallStatus.missed || (c.status == CallStatus.rejected && c.endedBy != widget.me.uid));
 
-    if (diff.inDays == 0) return timeStr;
-    if (diff.inDays == 1) return 'Yesterday, $timeStr';
-    return '${time.day}/${time.month}, $timeStr';
-  }
-
-  String _formatDuration(int? seconds) {
-    if (seconds == null || seconds == 0) return '';
-    final m = seconds ~/ 60;
-    final s = seconds % 60;
-    if (m > 0) return '${m}m ${s}s';
-    return '${s}s';
+  Future<void> _callBack(CallModel c) async {
+    final other = await UserService.instance.getUser(c.otherId(widget.me.uid));
+    if (other == null) return;
+    final error = await CallService.instance.startCall(me: widget.me, other: other, type: c.type);
+    if (error != null && mounted) showSnack(context, error, error: true);
   }
 
   @override
   Widget build(BuildContext context) {
-    final currentUid = _authService.currentUserId;
-    if (currentUid == null) return const SizedBox();
-
-    return Scaffold(
-      backgroundColor: AppColors.bg,
-      appBar: AppBar(
-        backgroundColor: AppColors.bg,
-        elevation: 0,
-        title: Text(
-          'Calls',
-          style: GoogleFonts.outfit(
-            fontSize: 28,
-            fontWeight: FontWeight.w800,
-            color: AppColors.text,
+    return SafeArea(
+      bottom: false,
+      child: Column(
+        children: [
+          const PageHeader(title: 'Calls'),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
+            child: Row(
+              children: [
+                _FilterPill(label: 'All', selected: !_missedOnly, onTap: () => setState(() => _missedOnly = false)),
+                const SizedBox(width: 8),
+                _FilterPill(label: 'Missed', selected: _missedOnly, onTap: () => setState(() => _missedOnly = true)),
+              ],
+            ),
           ),
-        ),
+          Expanded(
+            child: StreamBuilder<List<CallModel>>(
+              stream: _history,
+              builder: (context, snap) {
+                if (snap.hasError) {
+                  return const EmptyState(icon: Icons.cloud_off_rounded, title: 'Can\'t load calls', message: 'Check your connection and try again.');
+                }
+                if (!snap.hasData) return const Center(child: CircularProgressIndicator());
+                final calls = _missedOnly ? snap.data!.where(_isMissed).toList() : snap.data!;
+                if (calls.isEmpty) {
+                  return EmptyState(
+                    icon: _missedOnly ? Icons.phone_missed_rounded : Icons.call_rounded,
+                    title: _missedOnly ? 'No missed calls' : 'No calls yet',
+                    message: 'Start a voice or video call from any chat.',
+                  );
+                }
+                return ListView.builder(
+                  padding: const EdgeInsets.only(bottom: 120),
+                  itemCount: calls.length,
+                  itemBuilder: (context, i) => FadeSlideIn(index: i, child: _tile(calls[i])),
+                );
+              },
+            ),
+          ),
+        ],
       ),
-      body: StreamBuilder<List<CallModel>>(
-        stream: _callService.getCallHistory(currentUid),
-        builder: (context, snapshot) {
-          final calls = snapshot.data ?? [];
+    );
+  }
 
-          if (calls.isEmpty) {
-            return Center(
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Icon(
-                    Icons.call_outlined,
-                    size: 64,
-                    color: AppColors.textMuted.withValues(alpha: 0.3),
-                  ),
-                  const SizedBox(height: 16),
-                  Text(
-                    'No calls yet',
-                    style: GoogleFonts.outfit(
-                      fontSize: 18,
-                      fontWeight: FontWeight.w600,
-                      color: AppColors.textMuted,
-                    ),
-                  ),
-                  const SizedBox(height: 8),
-                  Text(
-                    'Start a call from a chat',
-                    style: GoogleFonts.inter(
-                      fontSize: 14,
-                      color: AppColors.textMuted.withValues(alpha: 0.6),
-                    ),
-                  ),
-                ],
-              ),
-            );
-          }
+  Widget _tile(CallModel c) {
+    final outgoing = c.callerId == widget.me.uid;
+    final missed = _isMissed(c);
+    final IconData icon;
+    final Color color;
+    final String detail;
+    if (missed) {
+      icon = Icons.call_missed_rounded;
+      color = AppColors.missed;
+      detail = 'Missed';
+    } else if (outgoing) {
+      icon = Icons.call_made_rounded;
+      color = AppColors.outgoing;
+      detail = switch (c.endReason) {
+        'declined' => 'Declined',
+        'no-answer' => 'No answer',
+        'busy' => 'Busy',
+        'cancelled' => 'Cancelled',
+        _ => c.duration != null ? formatDuration(Duration(seconds: c.duration!)) : 'Outgoing',
+      };
+    } else {
+      icon = Icons.call_received_rounded;
+      color = AppColors.incoming;
+      detail = c.status == CallStatus.rejected ? 'Declined' : (c.duration != null ? formatDuration(Duration(seconds: c.duration!)) : 'Incoming');
+    }
+    final name = c.otherName(widget.me.uid);
+    return ListTile(
+      contentPadding: const EdgeInsets.symmetric(horizontal: 20, vertical: 2),
+      leading: Avatar(name: name, photoUrl: c.otherPhoto(widget.me.uid), size: 48),
+      title: Text(name, style: AppTheme.body(15.5, weight: FontWeight.w600, color: missed ? AppColors.missed : AppColors.text)),
+      subtitle: Row(
+        children: [
+          Icon(icon, size: 15, color: color),
+          const SizedBox(width: 5),
+          Flexible(
+            child: Text('$detail · ${_when(c.timestamp)}', overflow: TextOverflow.ellipsis, style: AppTheme.body(13, color: AppColors.textMuted)),
+          ),
+        ],
+      ),
+      trailing: CircleIconButton(
+        icon: c.isVideo ? Icons.videocam_rounded : Icons.call_rounded,
+        background: AppColors.primarySoft,
+        foreground: AppColors.primary,
+        size: 40,
+        tooltip: 'Call back',
+        onTap: () => _callBack(c),
+      ),
+    );
+  }
 
-          return ListView.builder(
-            padding: const EdgeInsets.symmetric(vertical: 8),
-            itemCount: calls.length,
-            itemBuilder: (context, index) {
-              final call = calls[index];
-              final isOutgoing = call.callerId == currentUid;
-              final otherName =
-                  isOutgoing ? call.receiverName : call.callerName;
-              final otherPhoto =
-                  isOutgoing ? call.receiverPhoto : call.callerPhoto;
-              final isMissed = call.status == CallStatus.missed ||
-                  call.status == CallStatus.rejected;
+  static String _when(DateTime t) {
+    final now = DateTime.now();
+    if (DateUtils.isSameDay(t, now)) return DateFormat.jm().format(t);
+    if (DateUtils.isSameDay(t, now.subtract(const Duration(days: 1)))) return 'Yesterday';
+    return DateFormat.MMMd().format(t);
+  }
+}
 
-              return Padding(
-                padding: const EdgeInsets.symmetric(
-                  horizontal: 16,
-                  vertical: 6,
-                ),
-                child: Row(
-                  children: [
-                    // Avatar
-                    GestureDetector(
-                      onTap: () {
-                        if (otherPhoto.isNotEmpty) {
-                          Navigator.push(
-                            context,
-                            MaterialPageRoute(
-                              builder: (_) => FullScreenImageViewer(
-                                imageProvider: getImageProvider(otherPhoto),
-                                heroTag: 'call_dp_${call.id}',
-                              ),
-                            ),
-                          );
-                        }
-                      },
-                      child: Hero(
-                        tag: 'call_dp_${call.id}',
-                        child: Container(
-                          width: 48,
-                          height: 48,
-                          decoration: BoxDecoration(
-                            color: AppColors.bgElevated,
-                            borderRadius: BorderRadius.circular(14),
-                            image: otherPhoto.isNotEmpty
-                                ? DecorationImage(
-                                    image: getImageProvider(otherPhoto),
-                                    fit: BoxFit.cover,
-                                  )
-                                : null,
-                          ),
-                          child: otherPhoto.isEmpty
-                              ? Center(
-                                  child: Text(
-                                    otherName.isNotEmpty
-                                        ? otherName[0].toUpperCase()
-                                        : '?',
-                                    style: GoogleFonts.outfit(
-                                      fontSize: 18,
-                                      fontWeight: FontWeight.w700,
-                                      color: AppColors.primary,
-                                    ),
-                                  ),
-                                )
-                              : null,
-                        ),
-                      ),
-                    ),
-                    const SizedBox(width: 14),
-                    // Info
-                    Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(
-                            otherName,
-                            style: GoogleFonts.outfit(
-                              fontSize: 15,
-                              fontWeight: FontWeight.w600,
-                              color: isMissed
-                                  ? AppColors.error
-                                  : AppColors.text,
-                            ),
-                          ),
-                          const SizedBox(height: 3),
-                          Row(
-                            children: [
-                              Icon(
-                                isOutgoing
-                                    ? Icons.call_made_rounded
-                                    : Icons.call_received_rounded,
-                                size: 14,
-                                color: isMissed
-                                    ? AppColors.error
-                                    : isOutgoing
-                                        ? AppColors.outgoing
-                                        : AppColors.incoming,
-                              ),
-                              const SizedBox(width: 4),
-                              Text(
-                                _formatTime(call.timestamp),
-                                style: GoogleFonts.inter(
-                                  fontSize: 12,
-                                  color: AppColors.textMuted,
-                                ),
-                              ),
-                              if (call.duration != null && call.duration! > 0)
-                                Text(
-                                  ' • ${_formatDuration(call.duration)}',
-                                  style: GoogleFonts.inter(
-                                    fontSize: 12,
-                                    color: AppColors.textMuted,
-                                  ),
-                                ),
-                            ],
-                          ),
-                        ],
-                      ),
-                    ),
-                    // Call type icon
-                    Icon(
-                      call.type == CallType.video
-                          ? Icons.videocam_rounded
-                          : Icons.call_rounded,
-                      color: AppColors.primary,
-                      size: 22,
-                    ),
-                  ],
-                ),
-              );
-            },
-          );
-        },
+class _FilterPill extends StatelessWidget {
+  final String label;
+  final bool selected;
+  final VoidCallback onTap;
+  const _FilterPill({required this.label, required this.selected, required this.onTap});
+
+  @override
+  Widget build(BuildContext context) {
+    return TapScale(
+      onTap: onTap,
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 200),
+        padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 9),
+        decoration: BoxDecoration(
+          color: selected ? AppColors.primary : AppColors.bgAlt,
+          borderRadius: BorderRadius.circular(22),
+          border: Border.all(color: selected ? AppColors.primary : AppColors.border),
+        ),
+        child: Text(label, style: AppTheme.body(13.5, weight: FontWeight.w700, color: selected ? AppColors.textDark : AppColors.textMuted)),
       ),
     );
   }

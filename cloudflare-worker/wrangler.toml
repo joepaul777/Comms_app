@@ -1,0 +1,15 @@
+name = "comms-push"
+main = "src/index.js"
+compatibility_date = "2025-06-01"
+
+[vars]
+PROJECT_ID = "jp-comms"
+# Your Metered dashboard address, e.g. "yourname.metered.live"
+METERED_DOMAIN = "joepaul.metered.live"
+
+# The newest Comms release. Raise LATEST_BUILD (it must match the "+number" in
+# pubspec.yaml) and redeploy, and every phone on an older build is offered the update.
+LATEST_VERSION = "2.0.0"
+LATEST_BUILD = "5000"
+DOWNLOAD_URL = "https://joepaul.vercel.app/downloads/Comms.apk"
+RELEASE_NOTES = "Brand new look, voice messages, reliable calls that show when they are declined, and spam protection."

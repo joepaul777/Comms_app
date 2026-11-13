@@ -24,6 +24,9 @@
     <uses-permission android:name="android.permission.BLUETOOTH_SCAN"/>
     <uses-permission android:name="android.permission.NEARBY_WIFI_DEVICES"/>
 
+    <!-- Lets the "Update" button open Android's installer for the new version -->
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES"/>
+
     <application
         android:label="Comms"
         android:name="${applicationName}"

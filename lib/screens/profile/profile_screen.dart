@@ -1,455 +1,249 @@
 import 'dart:convert';
 import 'dart:io';
 import 'package:flutter/material.dart';
-import 'package:google_fonts/google_fonts.dart';
-import 'package:image_picker/image_picker.dart';
 import 'package:image_cropper/image_cropper.dart';
-import '../../theme/app_colors.dart';
-import '../../services/auth_service.dart';
-import '../../services/user_service.dart';
+import 'package:image_picker/image_picker.dart';
+import 'package:package_info_plus/package_info_plus.dart';
 import '../../models/user_model.dart';
-import '../auth/login_screen.dart';
-import '../../utils/image_utils.dart';
+import '../../services/auth_service.dart';
+import '../../services/update_service.dart';
+import '../../services/user_service.dart';
+import '../../theme/app_colors.dart';
+import '../../theme/app_theme.dart';
+import '../../widgets/avatar.dart';
+import '../../widgets/ui.dart';
+import '../chat/offline_lobby_screen.dart';
+import '../update/update_sheet.dart';
 
 class ProfileScreen extends StatefulWidget {
-  const ProfileScreen({super.key});
+  final UserModel me;
+  const ProfileScreen({super.key, required this.me});
 
   @override
   State<ProfileScreen> createState() => _ProfileScreenState();
 }
 
 class _ProfileScreenState extends State<ProfileScreen> {
-  final AuthService _authService = AuthService();
-  final UserService _userService = UserService();
+  late final Stream<UserModel?> _meStream = UserService.instance.userStream(widget.me.uid);
+  PackageInfo? _info;
+  bool _checking = false;
+
+  @override
+  void initState() {
+    super.initState();
+    UpdateService.current().then((i) {
+      if (mounted) setState(() => _info = i);
+    });
+  }
+
+  Future<void> _changePhoto() async {
+    final picked = await ImagePicker().pickImage(source: ImageSource.gallery);
+    if (picked == null) return;
+    final cropped = await ImageCropper().cropImage(
+      sourcePath: picked.path,
+      aspectRatio: const CropAspectRatio(ratioX: 1, ratioY: 1),
+      compressQuality: 70,
+      maxWidth: 384,
+      maxHeight: 384,
+      uiSettings: [
+        AndroidUiSettings(
+          toolbarTitle: 'Crop photo',
+          toolbarColor: AppColors.bg,
+          toolbarWidgetColor: AppColors.primary,
+          backgroundColor: AppColors.bg,
+          activeControlsWidgetColor: AppColors.primary,
+          initAspectRatio: CropAspectRatioPreset.square,
+          lockAspectRatio: true,
+          cropFrameColor: AppColors.primary,
+        ),
+        IOSUiSettings(title: 'Crop photo', aspectRatioLockEnabled: true),
+      ],
+    );
+    if (cropped == null) return;
+    final bytes = await File(cropped.path).readAsBytes();
+    // Profile photos stay small and live in the profile itself, so they never expire.
+    await UserService.instance.updateProfile(widget.me.uid, photoUrl: 'data:image/jpeg;base64,${base64Encode(bytes)}');
+    if (mounted) showSnack(context, 'Photo updated');
+  }
+
+  Future<void> _editName(String current) async {
+    final controller = TextEditingController(text: current);
+    final name = await showDialog<String>(
+      context: context,
+      builder: (d) => AlertDialog(
+        title: const Text('Your name'),
+        content: TextField(controller: controller, autofocus: true, maxLength: 40, textCapitalization: TextCapitalization.words),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(d), child: const Text('Cancel', style: TextStyle(color: AppColors.textMuted))),
+          TextButton(onPressed: () => Navigator.pop(d, controller.text), child: const Text('Save')),
+        ],
+      ),
+    );
+    if (name != null && name.trim().length >= 2) {
+      await UserService.instance.updateProfile(widget.me.uid, name: name);
+    }
+  }
+
+  Future<void> _checkUpdates() async {
+    setState(() => _checking = true);
+    final release = await UpdateService.newerRelease();
+    if (!mounted) return;
+    setState(() => _checking = false);
+    if (release == null) {
+      showSnack(context, 'You have the latest version');
+    } else {
+      showUpdateSheet(context, release);
+    }
+  }
 
   Future<void> _signOut() async {
-    final confirm = await showDialog<bool>(
+    final ok = await showDialog<bool>(
       context: context,
-      builder: (context) => AlertDialog(
-        backgroundColor: AppColors.bgAlt,
-        shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(20),
-        ),
-        title: Text(
-          'Sign Out',
-          style: GoogleFonts.outfit(
-            fontWeight: FontWeight.w700,
-            color: AppColors.text,
-          ),
-        ),
-        content: Text(
-          'Are you sure you want to sign out?',
-          style: GoogleFonts.inter(color: AppColors.textMuted),
-        ),
+      builder: (d) => AlertDialog(
+        title: const Text('Sign out?'),
+        content: const Text('You will stop getting messages and calls on this phone until you sign in again.'),
         actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context, false),
-            child: Text(
-              'Cancel',
-              style: GoogleFonts.inter(color: AppColors.textMuted),
-            ),
-          ),
-          TextButton(
-            onPressed: () => Navigator.pop(context, true),
-            child: Text(
-              'Sign Out',
-              style: GoogleFonts.inter(
-                color: AppColors.error,
-                fontWeight: FontWeight.w600,
-              ),
-            ),
-          ),
+          TextButton(onPressed: () => Navigator.pop(d, false), child: const Text('Cancel', style: TextStyle(color: AppColors.textMuted))),
+          TextButton(onPressed: () => Navigator.pop(d, true), child: const Text('Sign out', style: TextStyle(color: AppColors.error))),
         ],
       ),
     );
-
-    if (confirm == true) {
-      await _authService.signOut();
-      if (mounted) {
-        Navigator.of(context).pushAndRemoveUntil(
-          MaterialPageRoute(builder: (_) => const LoginScreen()),
-          (route) => false,
-        );
-      }
-    }
-  }
-
-  Future<void> _pickImage() async {
-    final picker = ImagePicker();
-    final pickedFile = await picker.pickImage(
-      source: ImageSource.gallery,
-    );
-
-    if (pickedFile != null) {
-      // Crop image to a square
-      final croppedFile = await ImageCropper().cropImage(
-        sourcePath: pickedFile.path,
-        aspectRatio: const CropAspectRatio(ratioX: 1, ratioY: 1),
-        compressQuality: 70,
-        maxWidth: 512,
-        maxHeight: 512,
-        uiSettings: [
-          AndroidUiSettings(
-            toolbarTitle: 'Crop Photo',
-            toolbarColor: AppColors.bg,
-            toolbarWidgetColor: AppColors.primary,
-            initAspectRatio: CropAspectRatioPreset.square,
-            lockAspectRatio: true,
-            backgroundColor: AppColors.bg,
-            dimmedLayerColor: Colors.black54,
-            cropFrameColor: AppColors.primary,
-            cropGridColor: AppColors.primary.withValues(alpha: 0.5),
-          ),
-          IOSUiSettings(
-            title: 'Crop Photo',
-            aspectRatioLockEnabled: true,
-            resetButtonHidden: true,
-          ),
-        ],
-      );
-
-      if (croppedFile != null) {
-        final currentUid = _authService.currentUserId;
-        if (currentUid == null) return;
-        final bytes = await File(croppedFile.path).readAsBytes();
-        final base64String = 'data:image/jpeg;base64,${base64Encode(bytes)}';
-        await _userService.updateUserProfile(uid: currentUid, photoUrl: base64String);
-      }
-    }
-  }
-
-  Future<void> _editName(String currentName) async {
-    final controller = TextEditingController(text: currentName);
-    final newName = await showDialog<String>(
-      context: context,
-      builder: (context) => AlertDialog(
-        backgroundColor: AppColors.bgAlt,
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
-        title: Text('Edit Name', style: GoogleFonts.outfit(color: AppColors.text, fontWeight: FontWeight.bold)),
-        content: TextField(
-          controller: controller,
-          style: const TextStyle(color: AppColors.text),
-          decoration: const InputDecoration(
-            hintText: 'Enter new name',
-            hintStyle: TextStyle(color: AppColors.textMuted),
-            enabledBorder: UnderlineInputBorder(borderSide: BorderSide(color: AppColors.textMuted)),
-            focusedBorder: UnderlineInputBorder(borderSide: BorderSide(color: AppColors.primary)),
-          ),
-          autofocus: true,
-          textCapitalization: TextCapitalization.words,
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context),
-            child: const Text('Cancel', style: TextStyle(color: AppColors.textMuted)),
-          ),
-          TextButton(
-            onPressed: () => Navigator.pop(context, controller.text.trim()),
-            child: const Text('Save', style: TextStyle(color: AppColors.primary, fontWeight: FontWeight.bold)),
-          ),
-        ],
-      ),
-    );
-
-    if (newName != null && newName.isNotEmpty && newName != currentName) {
-      final currentUid = _authService.currentUserId;
-      if (currentUid != null) {
-        await _userService.updateUserProfile(uid: currentUid, name: newName);
-      }
-    }
+    if (ok == true) await AuthService.instance.signOut();
   }
 
   @override
   Widget build(BuildContext context) {
-    final currentUid = _authService.currentUserId;
-    if (currentUid == null) return const SizedBox();
-
-    return Scaffold(
-      backgroundColor: AppColors.bg,
-      appBar: AppBar(
-        backgroundColor: AppColors.bg,
-        elevation: 0,
-        title: Text(
-          'Profile',
-          style: GoogleFonts.outfit(
-            fontSize: 28,
-            fontWeight: FontWeight.w800,
-            color: AppColors.text,
-          ),
-        ),
-      ),
-      body: StreamBuilder<UserModel?>(
-        stream: _userService.getUserStream(currentUid),
-        builder: (context, snapshot) {
-          final user = snapshot.data;
-          if (user == null) {
-            return const Center(
-              child: CircularProgressIndicator(color: AppColors.primary),
-            );
-          }
-
-          return SingleChildScrollView(
-            padding: const EdgeInsets.all(24),
-            child: Column(
-              children: [
-                const SizedBox(height: 20),
-                // Profile Picture
-                GestureDetector(
-                  onTap: _pickImage,
-                  child: Stack(
-                    children: [
-                      Container(
-                        width: 100,
-                        height: 100,
-                        decoration: BoxDecoration(
-                          color: AppColors.bgAlt,
-                          shape: BoxShape.circle,
-                          border: Border.all(
-                            color: AppColors.primary.withValues(alpha: 0.3),
-                            width: 3,
-                          ),
-                          boxShadow: [
-                            BoxShadow(
-                              color: AppColors.primary.withValues(alpha: 0.1),
-                              blurRadius: 20,
-                              spreadRadius: 5,
-                            ),
-                          ],
-                          image: user.photoUrl.isNotEmpty
-                              ? DecorationImage(
-                                  image: getImageProvider(user.photoUrl),
-                                  fit: BoxFit.cover,
-                                )
-                              : null,
-                        ),
-                        child: user.photoUrl.isEmpty
-                            ? Center(
-                                child: Text(
-                                  user.initials,
-                                  style: GoogleFonts.outfit(
-                                    fontSize: 36,
-                                    fontWeight: FontWeight.w800,
-                                    color: AppColors.primary,
-                                  ),
+    return SafeArea(
+      bottom: false,
+      child: StreamBuilder<UserModel?>(
+        stream: _meStream,
+        initialData: widget.me,
+        builder: (context, snap) {
+          final me = snap.data ?? widget.me;
+          return ListView(
+            padding: const EdgeInsets.only(bottom: 120),
+            children: [
+              const PageHeader(title: 'You'),
+              Center(
+                child: ConstrainedBox(
+                  constraints: const BoxConstraints(maxWidth: 560),
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 16),
+                    child: Column(
+                      children: [
+                        const SizedBox(height: 8),
+                        TapScale(
+                          onTap: _changePhoto,
+                          child: Stack(
+                            children: [
+                              Avatar(name: me.name, photoUrl: me.photoUrl, size: 112),
+                              Positioned(
+                                right: 2,
+                                bottom: 2,
+                                child: Container(
+                                  padding: const EdgeInsets.all(8),
+                                  decoration: BoxDecoration(color: AppColors.primary, shape: BoxShape.circle, border: Border.all(color: AppColors.bg, width: 3)),
+                                  child: const Icon(Icons.camera_alt_rounded, size: 18, color: AppColors.textDark),
                                 ),
-                              )
-                            : null,
-                      ),
-                      Positioned(
-                        bottom: 0,
-                        right: 0,
-                        child: Container(
-                          padding: const EdgeInsets.all(6),
-                          decoration: const BoxDecoration(
-                            color: AppColors.primary,
-                            shape: BoxShape.circle,
-                          ),
-                          child: const Icon(
-                            Icons.edit,
-                            size: 16,
-                            color: Colors.white,
+                              ),
+                            ],
                           ),
                         ),
-                      ),
-                    ],
-                  ),
-                ),
-                const SizedBox(height: 20),
-                // Name
-                Row(
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  children: [
-                    Text(
-                      user.name,
-                      style: GoogleFonts.outfit(
-                        fontSize: 24,
-                        fontWeight: FontWeight.w700,
-                        color: AppColors.text,
-                      ),
-                    ),
-                    const SizedBox(width: 8),
-                    GestureDetector(
-                      onTap: () => _editName(user.name),
-                      child: const Icon(
-                        Icons.edit,
-                        color: AppColors.primary,
-                        size: 20,
-                      ),
-                    ),
-                  ],
-                ),
-                const SizedBox(height: 4),
-                Text(
-                  user.email,
-                  style: GoogleFonts.inter(
-                    fontSize: 14,
-                    color: AppColors.textMuted,
-                  ),
-                ),
-                const SizedBox(height: 8),
-                Container(
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 12,
-                    vertical: 4,
-                  ),
-                  decoration: BoxDecoration(
-                    color: AppColors.online.withValues(alpha: 0.15),
-                    borderRadius: BorderRadius.circular(8),
-                  ),
-                  child: Text(
-                    'Online',
-                    style: GoogleFonts.inter(
-                      fontSize: 12,
-                      fontWeight: FontWeight.w600,
-                      color: AppColors.online,
-                    ),
-                  ),
-                ),
-                const SizedBox(height: 40),
-                // Info cards
-                _ProfileCard(
-                  icon: Icons.person_rounded,
-                  title: 'Display Name',
-                  subtitle: user.name,
-                ),
-                const SizedBox(height: 12),
-                _ProfileCard(
-                  icon: Icons.email_rounded,
-                  title: 'Email',
-                  subtitle: user.email,
-                ),
-                const SizedBox(height: 12),
-                _ProfileCard(
-                  icon: Icons.people_rounded,
-                  title: 'Contacts',
-                  subtitle: '${user.contacts.length} contacts',
-                ),
-                const SizedBox(height: 12),
-                _ProfileCard(
-                  icon: Icons.calendar_today_rounded,
-                  title: 'Joined',
-                  subtitle: _formatDate(user.createdAt),
-                ),
-                const SizedBox(height: 32),
-                // Sign out button
-                SizedBox(
-                  width: double.infinity,
-                  child: GestureDetector(
-                    onTap: _signOut,
-                    child: Container(
-                      padding: const EdgeInsets.symmetric(vertical: 16),
-                      decoration: BoxDecoration(
-                        color: AppColors.error.withValues(alpha: 0.1),
-                        borderRadius: BorderRadius.circular(14),
-                        border: Border.all(
-                          color: AppColors.error.withValues(alpha: 0.3),
-                        ),
-                      ),
-                      child: Row(
-                        mainAxisAlignment: MainAxisAlignment.center,
-                        children: [
-                          const Icon(
-                            Icons.logout_rounded,
-                            color: AppColors.error,
-                            size: 20,
+                        const SizedBox(height: 14),
+                        Text(me.name, style: AppTheme.display(26), textAlign: TextAlign.center),
+                        Text(me.email, style: AppTheme.body(14, color: AppColors.textMuted)),
+                        const SizedBox(height: 24),
+                        _Group(children: [
+                          _Row(icon: Icons.badge_rounded, title: 'Name', value: me.name, onTap: () => _editName(me.name)),
+                          _Row(icon: Icons.photo_camera_back_rounded, title: 'Profile photo', value: 'Change', onTap: _changePhoto),
+                        ]),
+                        const SizedBox(height: 14),
+                        _Group(children: [
+                          _Row(
+                            icon: Icons.wifi_tethering_rounded,
+                            title: 'Nearby chat',
+                            value: 'No internet needed',
+                            onTap: () => Navigator.of(context).push(MaterialPageRoute(builder: (_) => const OfflineLobbyScreen())),
                           ),
-                          const SizedBox(width: 10),
-                          Text(
-                            'Sign Out',
-                            style: GoogleFonts.inter(
-                              fontSize: 15,
-                              fontWeight: FontWeight.w600,
-                              color: AppColors.error,
-                            ),
+                        ]),
+                        const SizedBox(height: 14),
+                        _Group(children: [
+                          _Row(
+                            icon: Icons.system_update_rounded,
+                            title: 'Check for updates',
+                            value: _info == null ? '' : 'Version ${_info!.version}',
+                            trailing: _checking ? const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2)) : null,
+                            onTap: _checking ? null : _checkUpdates,
                           ),
-                        ],
-                      ),
+                        ]),
+                        const SizedBox(height: 14),
+                        _Group(children: [
+                          _Row(icon: Icons.logout_rounded, title: 'Sign out', danger: true, onTap: _signOut),
+                        ]),
+                        const SizedBox(height: 24),
+                        Text('Photos, videos and voice notes are kept on your phone.\nThe online copy is deleted after an hour.',
+                            textAlign: TextAlign.center, style: AppTheme.body(12.5, color: AppColors.textFaint, height: 1.5)),
+                      ],
                     ),
                   ),
                 ),
-                const SizedBox(height: 20),
-                // Version
-                Text(
-                  'Comms v1.0.0',
-                  style: GoogleFonts.inter(
-                    fontSize: 12,
-                    color: AppColors.textMuted.withValues(alpha: 0.4),
-                  ),
-                ),
-              ],
-            ),
+              ),
+            ],
           );
         },
       ),
     );
   }
-
-  String _formatDate(DateTime date) {
-    const months = [
-      'January', 'February', 'March', 'April', 'May', 'June',
-      'July', 'August', 'September', 'October', 'November', 'December',
-    ];
-    return '${months[date.month - 1]} ${date.day}, ${date.year}';
-  }
 }
 
-class _ProfileCard extends StatelessWidget {
-  final IconData icon;
-  final String title;
-  final String subtitle;
-
-  const _ProfileCard({
-    required this.icon,
-    required this.title,
-    required this.subtitle,
-  });
+class _Group extends StatelessWidget {
+  final List<Widget> children;
+  const _Group({required this.children});
 
   @override
   Widget build(BuildContext context) {
     return Container(
-      padding: const EdgeInsets.all(16),
-      decoration: BoxDecoration(
-        color: AppColors.bgAlt,
-        borderRadius: BorderRadius.circular(14),
-        border: Border.all(color: AppColors.border),
-      ),
-      child: Row(
+      decoration: BoxDecoration(color: AppColors.bgCard, borderRadius: BorderRadius.circular(20), border: Border.all(color: AppColors.border)),
+      clipBehavior: Clip.antiAlias,
+      child: Column(
         children: [
-          Container(
-            width: 40,
-            height: 40,
-            decoration: BoxDecoration(
-              color: AppColors.primary.withValues(alpha: 0.1),
-              borderRadius: BorderRadius.circular(10),
-            ),
-            child: Icon(icon, color: AppColors.primary, size: 20),
-          ),
-          const SizedBox(width: 14),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  title,
-                  style: GoogleFonts.inter(
-                    fontSize: 12,
-                    color: AppColors.textMuted,
-                    fontWeight: FontWeight.w500,
-                  ),
-                ),
-                const SizedBox(height: 2),
-                Text(
-                  subtitle,
-                  style: GoogleFonts.inter(
-                    fontSize: 15,
-                    color: AppColors.text,
-                    fontWeight: FontWeight.w500,
-                  ),
-                ),
-              ],
-            ),
-          ),
+          for (var i = 0; i < children.length; i++) ...[
+            if (i > 0) const Divider(indent: 56),
+            children[i],
+          ],
         ],
+      ),
+    );
+  }
+}
+
+class _Row extends StatelessWidget {
+  final IconData icon;
+  final String title;
+  final String value;
+  final VoidCallback? onTap;
+  final bool danger;
+  final Widget? trailing;
+  const _Row({required this.icon, required this.title, this.value = '', this.onTap, this.danger = false, this.trailing});
+
+  @override
+  Widget build(BuildContext context) {
+    final color = danger ? AppColors.error : AppColors.text;
+    return InkWell(
+      onTap: onTap,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 15),
+        child: Row(
+          children: [
+            Icon(icon, color: danger ? AppColors.error : AppColors.primary, size: 22),
+            const SizedBox(width: 18),
+            Expanded(child: Text(title, style: AppTheme.body(15.5, weight: FontWeight.w600, color: color))),
+            if (value.isNotEmpty)
+              Flexible(child: Text(value, overflow: TextOverflow.ellipsis, style: AppTheme.body(13.5, color: AppColors.textMuted))),
+            const SizedBox(width: 6),
+            trailing ?? (danger ? const SizedBox.shrink() : const Icon(Icons.chevron_right_rounded, color: AppColors.textFaint)),
+          ],
+        ),
       ),
     );
   }

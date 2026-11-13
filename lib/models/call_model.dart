@@ -9,9 +9,12 @@ class CallModel {
   final CallType type;
   final CallStatus status;
   final DateTime timestamp;
-  final int? duration; // in seconds
+  final int? duration; // seconds
 
-  // WebRTC signaling
+  /// Why the call stopped (see [EndReason]); empty while it is live.
+  final String endReason;
+  final String? endedBy;
+
   final Map<String, dynamic>? offer;
   final Map<String, dynamic>? answer;
 
@@ -27,9 +30,18 @@ class CallModel {
     this.status = CallStatus.ringing,
     DateTime? timestamp,
     this.duration,
+    this.endReason = '',
+    this.endedBy,
     this.offer,
     this.answer,
   }) : timestamp = timestamp ?? DateTime.now();
+
+  bool get isVideo => type == CallType.video;
+  bool get isOver => status == CallStatus.ended || status == CallStatus.missed || status == CallStatus.rejected;
+
+  String otherId(String me) => me == callerId ? receiverId : callerId;
+  String otherName(String me) => me == callerId ? receiverName : callerName;
+  String otherPhoto(String me) => me == callerId ? receiverPhoto : callerPhoto;
 
   Map<String, dynamic> toMap() {
     return {
@@ -44,6 +56,7 @@ class CallModel {
       'status': status.name,
       'timestamp': timestamp.millisecondsSinceEpoch,
       'duration': duration,
+      'endReason': endReason,
       'offer': offer,
       'answer': answer,
     };
@@ -58,60 +71,29 @@ class CallModel {
       receiverId: map['receiverId'] ?? '',
       receiverName: map['receiverName'] ?? '',
       receiverPhoto: map['receiverPhoto'] ?? '',
-      type: CallType.values.firstWhere(
-        (e) => e.name == map['type'],
-        orElse: () => CallType.audio,
-      ),
-      status: CallStatus.values.firstWhere(
-        (e) => e.name == map['status'],
-        orElse: () => CallStatus.ringing,
-      ),
-      timestamp: map['timestamp'] != null
-          ? DateTime.fromMillisecondsSinceEpoch(map['timestamp'])
-          : DateTime.now(),
-      duration: map['duration'],
-      offer: map['offer'] != null
-          ? Map<String, dynamic>.from(map['offer'])
-          : null,
-      answer: map['answer'] != null
-          ? Map<String, dynamic>.from(map['answer'])
-          : null,
-    );
-  }
-
-  CallModel copyWith({
-    CallStatus? status,
-    int? duration,
-    Map<String, dynamic>? offer,
-    Map<String, dynamic>? answer,
-  }) {
-    return CallModel(
-      id: id,
-      callerId: callerId,
-      callerName: callerName,
-      callerPhoto: callerPhoto,
-      receiverId: receiverId,
-      receiverName: receiverName,
-      receiverPhoto: receiverPhoto,
-      type: type,
-      status: status ?? this.status,
-      timestamp: timestamp,
-      duration: duration ?? this.duration,
-      offer: offer ?? this.offer,
-      answer: answer ?? this.answer,
+      type: CallType.values.firstWhere((e) => e.name == map['type'], orElse: () => CallType.audio),
+      status: CallStatus.values.firstWhere((e) => e.name == map['status'], orElse: () => CallStatus.ended),
+      timestamp: map['timestamp'] is int ? DateTime.fromMillisecondsSinceEpoch(map['timestamp']) : DateTime.now(),
+      duration: (map['duration'] as num?)?.toInt(),
+      endReason: map['endReason'] ?? '',
+      endedBy: map['endedBy'],
+      offer: map['offer'] != null ? Map<String, dynamic>.from(map['offer']) : null,
+      answer: map['answer'] != null ? Map<String, dynamic>.from(map['answer']) : null,
     );
   }
 }
 
-enum CallType {
-  audio,
-  video,
-}
+enum CallType { audio, video }
 
-enum CallStatus {
-  ringing,
-  connected,
-  ended,
-  missed,
-  rejected,
+/// Kept identical to version 1 so older phones still understand every call.
+enum CallStatus { ringing, connected, ended, missed, rejected }
+
+class EndReason {
+  EndReason._();
+  static const declined = 'declined';
+  static const cancelled = 'cancelled';
+  static const noAnswer = 'no-answer';
+  static const busy = 'busy';
+  static const hungUp = 'hung-up';
+  static const failed = 'failed';
 }

@@ -1,63 +1,30 @@
+import 'package:firebase_auth/firebase_auth.dart';
+import 'package:firebase_core/firebase_core.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:firebase_core/firebase_core.dart';
-import 'package:firebase_auth/firebase_auth.dart';
-import 'theme/app_theme.dart';
 import 'screens/auth/login_screen.dart';
 import 'screens/home/home_screen.dart';
 import 'services/notification_service.dart';
+import 'theme/app_colors.dart';
+import 'theme/app_theme.dart';
 
 final GlobalKey<NavigatorState> navigatorKey = GlobalKey<NavigatorState>();
 
-void main() async {
+Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await Firebase.initializeApp();
-
-  // Set system UI overlay style
-  SystemChrome.setSystemUIOverlayStyle(
-    const SystemUiOverlayStyle(
-      statusBarColor: Colors.transparent,
-      statusBarIconBrightness: Brightness.light,
-      systemNavigationBarColor: Color(0xFF171717),
-      systemNavigationBarIconBrightness: Brightness.light,
-    ),
-  );
-
-  // Launch app immediately — initialize notifications in the background
+  SystemChrome.setSystemUIOverlayStyle(const SystemUiOverlayStyle(
+    statusBarColor: Colors.transparent,
+    statusBarIconBrightness: Brightness.light,
+    systemNavigationBarColor: AppColors.bg,
+    systemNavigationBarIconBrightness: Brightness.light,
+  ));
   runApp(const CommsApp());
-
-  // Initialize notification service in parallel (don't block startup)
-  NotificationService().initialize();
+  NotificationService.instance.initialize();
 }
 
-class CommsApp extends StatefulWidget {
+class CommsApp extends StatelessWidget {
   const CommsApp({super.key});
-
-  @override
-  State<CommsApp> createState() => _CommsAppState();
-}
-
-class _CommsAppState extends State<CommsApp> {
-  @override
-  void initState() {
-    super.initState();
-    // Wire up the notification tap handler to navigate to the right screen
-    NotificationService().onNotificationTap = (type, id) {
-      if (type == 'chat') {
-        // Navigate to the home screen — user can tap the chat from the list
-        navigatorKey.currentState?.pushAndRemoveUntil(
-          MaterialPageRoute(builder: (_) => const HomeScreen()),
-          (route) => false,
-        );
-      } else if (type == 'call') {
-        // Navigate to home screen — the incoming call listener will pick it up
-        navigatorKey.currentState?.pushAndRemoveUntil(
-          MaterialPageRoute(builder: (_) => const HomeScreen()),
-          (route) => false,
-        );
-      }
-    };
-  }
 
   @override
   Widget build(BuildContext context) {
@@ -69,66 +36,39 @@ class _CommsAppState extends State<CommsApp> {
       home: StreamBuilder<User?>(
         stream: FirebaseAuth.instance.authStateChanges(),
         builder: (context, snapshot) {
+          final Widget page;
           if (snapshot.connectionState == ConnectionState.waiting) {
-            return const _SplashScreen();
+            page = const _Splash();
+          } else if (snapshot.hasData) {
+            page = HomeScreen(key: ValueKey(snapshot.data!.uid), uid: snapshot.data!.uid);
+          } else {
+            page = const LoginScreen();
           }
-
-          if (snapshot.hasData) {
-            // Save FCM token each time user is confirmed signed-in
-            NotificationService().onUserSignedIn();
-            return const HomeScreen();
-          }
-
-          return const LoginScreen();
+          return AnimatedSwitcher(duration: const Duration(milliseconds: 350), child: page);
         },
       ),
     );
   }
 }
 
-class _SplashScreen extends StatelessWidget {
-  const _SplashScreen();
+class _Splash extends StatelessWidget {
+  const _Splash();
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      backgroundColor: const Color(0xFF0A0A0A),
       body: Center(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Container(
-              width: 80,
-              height: 80,
-              decoration: BoxDecoration(
-                color: const Color(0xFF171717),
-                borderRadius: BorderRadius.circular(22),
-                border: Border.all(
-                  color: const Color(0xFFFACC15).withValues(alpha: 0.3),
-                  width: 2,
-                ),
-              ),
-              child: const Center(
-                child: Text(
-                  'CO.',
-                  style: TextStyle(
-                    fontSize: 28,
-                    fontWeight: FontWeight.w800,
-                    color: Color(0xFFFACC15),
-                  ),
-                ),
-              ),
-            ),
-            const SizedBox(height: 24),
-            const SizedBox(
-              width: 24,
-              height: 24,
-              child: CircularProgressIndicator(
-                strokeWidth: 2.5,
-                color: Color(0xFFFACC15),
-              ),
-            ),
-          ],
+        child: TweenAnimationBuilder<double>(
+          tween: Tween(begin: 0.8, end: 1),
+          duration: const Duration(milliseconds: 700),
+          curve: Curves.elasticOut,
+          builder: (_, v, child) => Transform.scale(scale: v, child: child),
+          child: Container(
+            width: 84,
+            height: 84,
+            decoration: BoxDecoration(color: AppColors.primary, borderRadius: BorderRadius.circular(26)),
+            child: Center(child: Text('CO.', style: AppTheme.display(28, weight: FontWeight.w900, color: AppColors.textDark))),
+          ),
         ),
       ),
     );

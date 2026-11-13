@@ -28,7 +28,7 @@ class _OfflineLobbyScreenState extends State<OfflineLobbyScreen> {
     _offlineService.removeListener(_onServiceUpdate);
     // Don't disconnect if we just navigated to the chat screen
     if (_offlineService.connectedEndpointId == null) {
-      _offlineService.disconnect();
+      _offlineService.stopDiscoveryOnly();
     }
     super.dispose();
   }
@@ -54,13 +54,12 @@ class _OfflineLobbyScreenState extends State<OfflineLobbyScreen> {
     final user = FirebaseAuth.instance.currentUser;
     final name = user?.displayName ?? "Unknown User";
     
-    await _offlineService.startAdvertising(name);
     await _offlineService.startDiscovery(name);
   }
 
   @override
   Widget build(BuildContext context) {
-    final isActive = _offlineService.isAdvertising || _offlineService.isDiscovering;
+    final isActive = _offlineService.isDiscovering;
     
     return Scaffold(
       backgroundColor: AppColors.bg,
@@ -81,7 +80,7 @@ class _OfflineLobbyScreenState extends State<OfflineLobbyScreen> {
           const SizedBox(height: 40),
           // Radar Animation Placeholder / Button
           GestureDetector(
-            onTap: isActive ? _offlineService.disconnect : _startRadar,
+            onTap: isActive ? _offlineService.stopDiscoveryOnly : _startRadar,
             child: Center(
               child: Container(
                 width: 200,

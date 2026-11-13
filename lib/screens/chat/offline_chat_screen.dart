@@ -22,11 +22,13 @@ class _OfflineChatScreenState extends State<OfflineChatScreen> {
   @override
   void initState() {
     super.initState();
+    _offlineService.isChatScreenOpen = true;
     _offlineService.addListener(_onServiceUpdate);
   }
 
   @override
   void dispose() {
+    _offlineService.isChatScreenOpen = false;
     _offlineService.removeListener(_onServiceUpdate);
     _messageController.dispose();
     _scrollController.dispose();

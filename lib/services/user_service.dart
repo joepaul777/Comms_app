@@ -2,106 +2,107 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import '../models/user_model.dart';
 
 class UserService {
-  final FirebaseFirestore _firestore = FirebaseFirestore.instance;
+  UserService._();
+  static final UserService instance = UserService._();
+  factory UserService() => instance;
 
-  Future<UserModel?> getUser(String uid) async {
-    final doc = await _firestore.collection('users').doc(uid).get();
-    if (doc.exists) {
-      return UserModel.fromMap(doc.data()!);
-    }
-    return null;
+  final FirebaseFirestore _db = FirebaseFirestore.instance;
+  final Map<String, UserModel> _cache = {};
+
+  CollectionReference<Map<String, dynamic>> get _users => _db.collection('users');
+
+  UserModel? cached(String uid) => _cache[uid];
+
+  Future<UserModel?> getUser(String uid, {bool fresh = false}) async {
+    if (!fresh && _cache.containsKey(uid)) return _cache[uid];
+    final doc = await _users.doc(uid).get(fresh ? const GetOptions(source: Source.server) : null);
+    if (!doc.exists) return null;
+    return _cache[uid] = UserModel.fromMap(doc.data()!);
   }
 
-  Stream<UserModel?> getUserStream(String uid) {
-    return _firestore
-        .collection('users')
-        .doc(uid)
-        .snapshots()
-        .map((doc) => doc.exists ? UserModel.fromMap(doc.data()!) : null);
-  }
-
-  Future<List<UserModel>> searchUsers(String query) async {
-    if (query.isEmpty) return [];
-
-    final queryLower = query.toLowerCase();
-
-    // Search by email (exact prefix match)
-    final emailResults = await _firestore
-        .collection('users')
-        .where('email', isGreaterThanOrEqualTo: queryLower)
-        .where('email', isLessThan: '${queryLower}z')
-        .limit(10)
-        .get();
-
-    // Search by name
-    final nameResults = await _firestore
-        .collection('users')
-        .orderBy('name')
-        .startAt([query.substring(0, 1).toUpperCase() + query.substring(1)])
-        .endAt(['${query.substring(0, 1).toUpperCase() + query.substring(1)}\uf8ff'])
-        .limit(10)
-        .get();
-
-    final Map<String, UserModel> uniqueUsers = {};
-    for (final doc in emailResults.docs) {
-      uniqueUsers[doc.id] = UserModel.fromMap(doc.data());
-    }
-    for (final doc in nameResults.docs) {
-      uniqueUsers[doc.id] = UserModel.fromMap(doc.data());
-    }
-
-    return uniqueUsers.values.toList();
-  }
-
-  Future<void> updateUserProfile({
-    required String uid,
-    String? name,
-    String? photoUrl,
-  }) async {
-    final updates = <String, dynamic>{};
-    if (name != null) updates['name'] = name;
-    if (photoUrl != null) updates['photoUrl'] = photoUrl;
-    if (updates.isNotEmpty) {
-      await _firestore.collection('users').doc(uid).update(updates);
-    }
-  }
-
-  Future<void> addContact(String currentUid, String contactUid) async {
-    await _firestore.collection('users').doc(currentUid).update({
-      'contacts': FieldValue.arrayUnion([contactUid]),
+  Stream<UserModel?> userStream(String uid) {
+    return _users.doc(uid).snapshots().map((doc) {
+      if (!doc.exists) return null;
+      return _cache[uid] = UserModel.fromMap(doc.data()!);
     });
   }
 
-  Future<void> removeContact(String currentUid, String contactUid) async {
-    await _firestore.collection('users').doc(currentUid).update({
-      'contacts': FieldValue.arrayRemove([contactUid]),
-    });
-  }
-
-  Stream<List<UserModel>> getContacts(String uid) {
-    return _firestore
-        .collection('users')
-        .doc(uid)
-        .snapshots()
-        .asyncMap((doc) async {
-      if (!doc.exists) return [];
-      final contacts = List<String>.from(doc.data()?['contacts'] ?? []);
-      if (contacts.isEmpty) return [];
-
-      final List<UserModel> users = [];
-      // Firestore whereIn limited to 30 items
-      for (var i = 0; i < contacts.length; i += 30) {
-        final batch = contacts.sublist(
-          i,
-          i + 30 > contacts.length ? contacts.length : i + 30,
-        );
-        final results = await _firestore
-            .collection('users')
-            .where('uid', whereIn: batch)
-            .get();
-        users.addAll(results.docs.map((d) => UserModel.fromMap(d.data())));
+  /// Finds people by the start of their name or email.
+  Future<List<UserModel>> search(String query, {required String excludeUid}) async {
+    final q = query.trim();
+    if (q.length < 2) return [];
+    final lower = q.toLowerCase();
+    final capitalised = lower[0].toUpperCase() + lower.substring(1);
+    final results = await Future.wait([
+      _users.where('nameLower', isGreaterThanOrEqualTo: lower).where('nameLower', isLessThan: '$lower').limit(15).get(),
+      _users.where('email', isGreaterThanOrEqualTo: lower).where('email', isLessThan: '$lower').limit(15).get(),
+      // People who have not opened version 2 yet have no lowercase name stored.
+      _users.where('name', isGreaterThanOrEqualTo: capitalised).where('name', isLessThan: '$capitalised').limit(15).get(),
+    ]);
+    final found = <String, UserModel>{};
+    for (final snapshot in results) {
+      for (final doc in snapshot.docs) {
+        if (doc.id == excludeUid) continue;
+        found[doc.id] = _cache[doc.id] = UserModel.fromMap(doc.data());
       }
-      return users;
+    }
+    final list = found.values.toList()..sort((a, b) => a.name.toLowerCase().compareTo(b.name.toLowerCase()));
+    return list;
+  }
+
+  Future<void> updateProfile(String uid, {String? name, String? photoUrl}) async {
+    final updates = <String, dynamic>{
+      if (name != null) 'name': name.trim(),
+      if (name != null) 'nameLower': name.trim().toLowerCase(),
+      if (photoUrl != null) 'photoUrl': photoUrl,
+    };
+    if (updates.isNotEmpty) await _users.doc(uid).update(updates);
+  }
+
+  Future<void> addContact(String myUid, String contactUid) {
+    return _users.doc(myUid).update({'contacts': FieldValue.arrayUnion([contactUid])});
+  }
+
+  Future<void> removeContact(String myUid, String contactUid) {
+    return _users.doc(myUid).update({'contacts': FieldValue.arrayRemove([contactUid])});
+  }
+
+  Future<List<UserModel>> getUsers(List<String> uids) async {
+    final missing = uids.where((id) => !_cache.containsKey(id)).toSet().toList();
+    for (var i = 0; i < missing.length; i += 30) {
+      final chunk = missing.sublist(i, i + 30 > missing.length ? missing.length : i + 30);
+      final snap = await _users.where('uid', whereIn: chunk).get();
+      for (final doc in snap.docs) {
+        _cache[doc.id] = UserModel.fromMap(doc.data());
+      }
+    }
+    return uids.map((id) => _cache[id]).whereType<UserModel>().toList();
+  }
+
+  Stream<List<UserModel>> contacts(String uid) {
+    return userStream(uid).asyncMap((me) async {
+      final ids = me?.contacts ?? const <String>[];
+      if (ids.isEmpty) return <UserModel>[];
+      final list = await getUsers(ids);
+      list.sort((a, b) => a.name.toLowerCase().compareTo(b.name.toLowerCase()));
+      return list;
     });
+  }
+
+  /// Marks this person as busy (ringing or on a call) for the next minute.
+  Future<void> setBusy(String uid, bool busy) async {
+    try {
+      await _users.doc(uid).update({
+        'busyUntil': busy ? DateTime.now().add(const Duration(seconds: 60)).millisecondsSinceEpoch : FieldValue.delete(),
+      });
+    } catch (_) {
+      // Not being marked busy only means someone else might ring through.
+    }
+  }
+
+  Future<void> setOnline(String uid, bool online) async {
+    try {
+      await _users.doc(uid).update({'isOnline': online, 'lastSeen': DateTime.now().millisecondsSinceEpoch});
+    } catch (_) {}
   }
 }

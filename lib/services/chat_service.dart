@@ -1,272 +1,224 @@
+import 'dart:async';
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:flutter/foundation.dart';
 import 'package:uuid/uuid.dart';
+import '../config.dart';
 import '../models/chat_room_model.dart';
 import '../models/message_model.dart';
-import 'notification_service.dart';
+import '../models/user_model.dart';
+import 'push_api.dart';
+import 'rate_limiter.dart';
 
 class ChatService {
-  final FirebaseFirestore _firestore = FirebaseFirestore.instance;
+  ChatService._();
+  static final ChatService instance = ChatService._();
+  factory ChatService() => instance;
+
+  final FirebaseFirestore _db = FirebaseFirestore.instance;
   final Uuid _uuid = const Uuid();
 
-  // Get or create a direct chat room between two users
-  Future<ChatRoomModel> getOrCreateDirectChat(
-    String currentUid,
-    String otherUid,
-  ) async {
-    // Check if a direct chat already exists between these users
-    final query = await _firestore
+  final SendGate _gate = SendGate(
+    minGap: AppConfig.minMessageGap,
+    maxPerWindow: AppConfig.messagesPerMinute,
+    window: const Duration(minutes: 1),
+    noun: 'messages',
+  );
+
+  /// The signed-in user's own document, kept fresh so sends know the current limits.
+  UserModel? me;
+
+  String newId() => _uuid.v4();
+
+  /// Throws [RateLimitException] if a message can't be sent right now.
+  void checkCanSend() => _gate.check();
+
+  Future<ChatRoomModel> getOrCreateDirectChat(String myUid, String otherUid) async {
+    final existing = await _db
         .collection('chatRooms')
+        .where('participants', arrayContains: myUid)
         .where('type', isEqualTo: ChatRoomType.direct.name)
-        .where('participants', arrayContains: currentUid)
         .get();
-
-    for (final doc in query.docs) {
-      final participants = List<String>.from(doc.data()['participants']);
-      if (participants.contains(otherUid) && participants.length == 2) {
-        return ChatRoomModel.fromMap(doc.data());
-      }
+    for (final doc in existing.docs) {
+      final room = ChatRoomModel.fromMap(doc.data());
+      if (room.participants.length == 2 && room.participants.contains(otherUid)) return room;
     }
-
-    // Create new direct chat room
-    final chatRoom = ChatRoomModel(
-      id: _uuid.v4(),
-      type: ChatRoomType.direct,
-      participants: [currentUid, otherUid],
-    );
-
-    await _firestore
-        .collection('chatRooms')
-        .doc(chatRoom.id)
-        .set(chatRoom.toMap());
-
-    return chatRoom;
+    // A fixed id means two people starting a chat at the same moment get the same room.
+    final ids = [myUid, otherUid]..sort();
+    final room = ChatRoomModel(id: 'dm_${ids[0]}_${ids[1]}', type: ChatRoomType.direct, participants: ids);
+    // Merge only the fixed fields, so a chat the other person just created keeps its messages summary.
+    await _db.collection('chatRooms').doc(room.id).set({
+      'id': room.id,
+      'type': room.type.name,
+      'participants': room.participants,
+      'createdAt': room.createdAt.millisecondsSinceEpoch,
+    }, SetOptions(merge: true));
+    return room;
   }
 
-  // Create a group chat
   Future<ChatRoomModel> createGroupChat({
-    required String adminId,
+    required UserModel admin,
     required String groupName,
     required List<String> memberIds,
   }) async {
-    final participants = [adminId, ...memberIds];
-    final chatRoom = ChatRoomModel(
-      id: _uuid.v4(),
+    final room = ChatRoomModel(
+      id: newId(),
       type: ChatRoomType.group,
-      participants: participants,
-      groupName: groupName,
-      adminId: adminId,
+      participants: [admin.uid, ...memberIds.where((id) => id != admin.uid)],
+      groupName: groupName.trim(),
+      adminId: admin.uid,
     );
-
-    await _firestore
-        .collection('chatRooms')
-        .doc(chatRoom.id)
-        .set(chatRoom.toMap());
-
-    // Send system message
-    await sendMessage(
-      chatRoomId: chatRoom.id,
-      senderId: adminId,
-      senderName: 'System',
-      text: 'Group "$groupName" created',
-      type: MessageType.system,
-    );
-
-    return chatRoom;
+    await _db.collection('chatRooms').doc(room.id).set(room.toMap());
+    await sendMessage(room: room, sender: admin, text: '${admin.firstName} created "${room.groupName}"', type: MessageType.system);
+    return room;
   }
 
-  // Get chat rooms for a user — sorted client-side to avoid needing a composite index
-  Stream<List<ChatRoomModel>> getChatRooms(String uid) {
-    return _firestore
-        .collection('chatRooms')
-        .where('participants', arrayContains: uid)
-        .snapshots()
-        .map((snapshot) {
-      final rooms = snapshot.docs
-          .map((doc) => ChatRoomModel.fromMap(doc.data()))
-          .toList();
-      // Sort by lastMessageTime descending (most recent first)
+  Stream<List<ChatRoomModel>> chatRooms(String uid) {
+    return _db.collection('chatRooms').where('participants', arrayContains: uid).snapshots().map((snapshot) {
+      final rooms = snapshot.docs.map((d) => ChatRoomModel.fromMap(d.data())).toList();
       rooms.sort((a, b) => b.lastMessageTime.compareTo(a.lastMessageTime));
       return rooms;
     });
   }
 
-  // Get messages in a chat room
-  Stream<List<MessageModel>> getMessages(String chatRoomId) {
-    return _firestore
-        .collection('chatRooms')
-        .doc(chatRoomId)
-        .collection('messages')
-        .orderBy('timestamp', descending: false)
-        .snapshots()
-        .map((snapshot) => snapshot.docs
-            .map((doc) => MessageModel.fromMap(doc.data()))
-            .toList());
+  Stream<ChatRoomModel?> chatRoom(String id) {
+    return _db.collection('chatRooms').doc(id).snapshots().map((d) => d.exists ? ChatRoomModel.fromMap(d.data()!) : null);
   }
 
-  // Send a message
+  /// Newest first, which suits a reversed chat list.
+  Stream<List<MessageModel>> messages(String roomId, {int limit = 300}) {
+    return _db
+        .collection('chatRooms')
+        .doc(roomId)
+        .collection('messages')
+        .orderBy('timestamp', descending: true)
+        .limit(limit)
+        .snapshots()
+        .map((s) => s.docs.map((d) => MessageModel.fromMap(d.data())).toList());
+  }
+
+  static String previewFor(MessageType type, String text) {
+    switch (type) {
+      case MessageType.image:
+        return '📷 Photo';
+      case MessageType.video:
+        return '🎥 Video';
+      case MessageType.audio:
+        return '🎤 Voice message';
+      case MessageType.gif:
+        return 'GIF';
+      default:
+        return text;
+    }
+  }
+
+  /// Sends a message. The database only accepts it together with an update to the
+  /// sender's rate fields, which is what keeps people from flooding a chat.
   Future<void> sendMessage({
-    required String chatRoomId,
-    required String senderId,
-    required String senderName,
+    required ChatRoomModel room,
+    required UserModel sender,
     required String text,
-    String? replyToId,
-    String? replyToText,
-    String? replyToSenderName,
     MessageType type = MessageType.text,
+    String? id,
     String? mediaUrl,
-    String? localFilePath,
+    String? mediaName,
+    int? mediaSize,
+    int? durationMs,
+    MessageModel? replyTo,
   }) async {
-    final messageId = const Uuid().v4();
-    final timestamp = DateTime.now();
-
+    if (type != MessageType.system) _gate.check();
     final message = MessageModel(
-      id: messageId,
-      senderId: senderId,
-      senderName: senderName,
+      id: id ?? newId(),
+      senderId: sender.uid,
+      senderName: sender.name,
       text: text,
-      timestamp: timestamp,
+      timestamp: DateTime.now(),
       type: type,
-      replyToId: replyToId,
-      replyToText: replyToText,
-      replyToSenderName: replyToSenderName,
       mediaUrl: mediaUrl,
-      localFilePath: localFilePath,
+      mediaName: mediaName,
+      mediaSize: mediaSize,
+      durationMs: durationMs,
+      replyToId: replyTo?.id,
+      replyToText: replyTo == null ? null : previewFor(replyTo.type, replyTo.text),
+      replyToSenderName: replyTo?.senderName,
     );
 
-    final batch = _firestore.batch();
+    final current = me?.uid == sender.uid ? me! : sender;
+    final newWindow = SendGate.startsNewWindow(current.msgWindowStart, const Duration(minutes: 1), DateTime.now());
 
-    // Add message
-    batch.set(
-      _firestore
-          .collection('chatRooms')
-          .doc(chatRoomId)
-          .collection('messages')
-          .doc(message.id),
-      message.toMap(),
-    );
+    Future<void> commit(bool startWindow) {
+      final batch = _db.batch();
+      final roomRef = _db.collection('chatRooms').doc(room.id);
+      batch.set(roomRef.collection('messages').doc(message.id), message.toMap());
+      batch.update(roomRef, {
+        'lastMessage': previewFor(type, text),
+        'lastMessageSenderId': sender.uid,
+        'lastMessageTime': message.timestamp.millisecondsSinceEpoch,
+        for (final uid in room.participants)
+          if (uid != sender.uid && type != MessageType.system) 'unreadCount.$uid': FieldValue.increment(1),
+      });
+      batch.update(
+        _db.collection('users').doc(sender.uid),
+        SendGate.fields(lastField: 'lastMessageAt', startField: 'msgWindowStart', countField: 'msgWindowCount', newWindow: startWindow),
+      );
+      return batch.commit();
+    }
 
-    // Update chat room last message
-    batch.update(
-      _firestore.collection('chatRooms').doc(chatRoomId),
-      {
-        'lastMessage': text,
-        'lastMessageSenderId': senderId,
-        'lastMessageTime': DateTime.now().millisecondsSinceEpoch,
-      },
-    );
-
-    await batch.commit();
-
-    // Send push notifications to all participants except the sender
-    _sendMessageNotifications(
-      chatRoomId: chatRoomId,
-      senderId: senderId,
-      senderName: senderName,
-      text: text,
-      type: type,
-    );
-  }
-
-  // Delete a message
-  Future<void> deleteMessage(String chatRoomId, String messageId) async {
-    await _firestore
-        .collection('chatRooms')
-        .doc(chatRoomId)
-        .collection('messages')
-        .doc(messageId)
-        .delete();
-  }
-
-  /// Look up each participant's FCM token and send them a push notification
-  Future<void> _sendMessageNotifications({
-    required String chatRoomId,
-    required String senderId,
-    required String senderName,
-    required String text,
-    required MessageType type,
-  }) async {
+    _gate.record();
     try {
-      final chatRoomDoc =
-          await _firestore.collection('chatRooms').doc(chatRoomId).get();
-      if (!chatRoomDoc.exists) return;
-
-      final chatRoom = ChatRoomModel.fromMap(chatRoomDoc.data()!);
-      final recipients =
-          chatRoom.participants.where((id) => id != senderId).toList();
-
-      final isGroup = chatRoom.isGroup;
-      final chatName =
-          isGroup ? (chatRoom.groupName ?? 'Group Chat') : senderName;
-      
-      String body = text;
-      if (type == MessageType.image) body = '📷 Photo';
-      if (type == MessageType.video) body = '📹 Video';
-      if (type == MessageType.audio) body = '🎤 Voice Message';
-      if (type == MessageType.gif) body = '👾 GIF';
-      if (isGroup) body = '$senderName: $body';
-
-      for (final uid in recipients) {
-        final userDoc = await _firestore.collection('users').doc(uid).get();
-        final fcmToken = userDoc.data()?['fcmToken'] as String?;
-        if (fcmToken == null || fcmToken.isEmpty) continue;
-
-        NotificationService.sendPushNotification(
-          recipientFcmToken: fcmToken,
-          title: chatName,
-          message: body,
-          data: {'type': 'chat', 'id': chatRoomId},
-        );
+      await commit(newWindow);
+    } on FirebaseException catch (e) {
+      if (e.code != 'permission-denied') rethrow;
+      // Our guess about the one-minute window was off; the other answer should be right.
+      await Future.delayed(const Duration(milliseconds: 750));
+      try {
+        await commit(!newWindow);
+      } on FirebaseException catch (e2) {
+        if (e2.code == 'permission-denied') {
+          throw RateLimitException(const Duration(seconds: 5), 'Too many messages. Wait a moment');
+        }
+        rethrow;
       }
-    } catch (_) {
-      // Notification failure should never crash the chat
+    }
+    if (type != MessageType.system) unawaited(PushApi.message(room.id, message.id));
+  }
+
+  Future<void> markRead(ChatRoomModel room, String uid) async {
+    if ((room.unreadCount[uid] ?? 0) == 0) return;
+    try {
+      await _db.collection('chatRooms').doc(room.id).update({'unreadCount.$uid': 0});
+    } catch (e) {
+      debugPrint('markRead failed: $e');
     }
   }
 
-  // Mark messages as read
-  Future<void> markMessagesAsRead(String chatRoomId, String uid) async {
-    await _firestore.collection('chatRooms').doc(chatRoomId).update({
-      'unreadCount.$uid': 0,
-    });
+  Future<void> deleteMessage(String roomId, String messageId) {
+    return _db.collection('chatRooms').doc(roomId).collection('messages').doc(messageId).delete();
   }
 
-  // Add member to group
-  Future<void> addMemberToGroup(String chatRoomId, String memberId) async {
-    await _firestore.collection('chatRooms').doc(chatRoomId).update({
-      'participants': FieldValue.arrayUnion([memberId]),
-    });
+  Future<void> addMember(String roomId, String uid) {
+    return _db.collection('chatRooms').doc(roomId).update({'participants': FieldValue.arrayUnion([uid])});
   }
 
-  // Remove member from group
-  Future<void> removeMemberFromGroup(
-      String chatRoomId, String memberId) async {
-    await _firestore.collection('chatRooms').doc(chatRoomId).update({
-      'participants': FieldValue.arrayRemove([memberId]),
-    });
+  Future<void> removeMember(String roomId, String uid) {
+    return _db.collection('chatRooms').doc(roomId).update({'participants': FieldValue.arrayRemove([uid])});
   }
 
-  // Get a chat room by ID
-  Stream<ChatRoomModel?> getChatRoom(String chatRoomId) {
-    return _firestore
-        .collection('chatRooms')
-        .doc(chatRoomId)
-        .snapshots()
-        .map((doc) => doc.exists ? ChatRoomModel.fromMap(doc.data()!) : null);
+  Future<void> renameGroup(String roomId, String name) {
+    return _db.collection('chatRooms').doc(roomId).update({'groupName': name.trim()});
   }
 
-  // Delete a chat room
-  Future<void> deleteChatRoom(String chatRoomId) async {
-    // Delete all messages first
-    final messages = await _firestore
-        .collection('chatRooms')
-        .doc(chatRoomId)
-        .collection('messages')
-        .get();
-
-    final batch = _firestore.batch();
-    for (final doc in messages.docs) {
-      batch.delete(doc.reference);
+  /// Deletes a chat and its messages for everyone in it.
+  Future<void> deleteChat(String roomId) async {
+    final roomRef = _db.collection('chatRooms').doc(roomId);
+    while (true) {
+      final page = await roomRef.collection('messages').limit(400).get();
+      if (page.docs.isEmpty) break;
+      final batch = _db.batch();
+      for (final doc in page.docs) {
+        batch.delete(doc.reference);
+      }
+      await batch.commit();
     }
-    batch.delete(_firestore.collection('chatRooms').doc(chatRoomId));
-    await batch.commit();
+    await roomRef.delete();
   }
 }
