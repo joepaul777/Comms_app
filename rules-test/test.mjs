@@ -108,6 +108,25 @@ const { deleteDoc } = await import('firebase/firestore');
 await check('in a two-person chat, either person can clear messages', () => assertSucceeds(deleteDoc(doc(bob, 'chatRooms', 'r1', 'messages', 'm1'))));
 await check('an outsider cannot delete messages', () => assertFails(deleteDoc(doc(eve, 'chatRooms', 'r1', 'messages', 'm3'))));
 
+// Reactions, editing, receipts and typing
+await env.withSecurityRulesDisabled(async ctx => {
+  const db = ctx.firestore();
+  await setDoc(doc(db, 'chatRooms', 'r1', 'messages', 'fresh'), { id: 'fresh', senderId: 'alice', text: 'hi', type: 'text', timestamp: Date.now() });
+  await setDoc(doc(db, 'chatRooms', 'r1', 'messages', 'old'), { id: 'old', senderId: 'alice', text: 'hi', type: 'text', timestamp: Date.now() - 20 * 60 * 1000 });
+  await setDoc(doc(db, 'chatRooms', 'r1', 'messages', 'pic'), { id: 'pic', senderId: 'alice', text: '', type: 'image', timestamp: Date.now() });
+});
+await check('a member can react', () => assertSucceeds(updateDoc(doc(bob, 'chatRooms', 'r1', 'messages', 'fresh'), { 'reactions.bob': '👍' })));
+await check('a member can change their reaction', () => assertSucceeds(updateDoc(doc(bob, 'chatRooms', 'r1', 'messages', 'fresh'), { 'reactions.bob': '😂' })));
+await check('nobody can set someone else\'s reaction', () => assertFails(updateDoc(doc(bob, 'chatRooms', 'r1', 'messages', 'fresh'), { 'reactions.alice': '👍' })));
+await check('reactions must be short', () => assertFails(updateDoc(doc(bob, 'chatRooms', 'r1', 'messages', 'fresh'), { 'reactions.bob': 'x'.repeat(40) })));
+await check('an outsider cannot react', () => assertFails(updateDoc(doc(eve, 'chatRooms', 'r1', 'messages', 'fresh'), { 'reactions.eve': '👍' })));
+await check('the sender can edit a recent message', () => assertSucceeds(updateDoc(doc(alice, 'chatRooms', 'r1', 'messages', 'fresh'), { text: 'hello', editedAt: Date.now() })));
+await check('someone else cannot edit it', () => assertFails(updateDoc(doc(bob, 'chatRooms', 'r1', 'messages', 'fresh'), { text: 'x', editedAt: Date.now() })));
+await check('an old message cannot be edited', () => assertFails(updateDoc(doc(alice, 'chatRooms', 'r1', 'messages', 'old'), { text: 'x', editedAt: Date.now() })));
+await check('a photo cannot be edited', () => assertFails(updateDoc(doc(alice, 'chatRooms', 'r1', 'messages', 'pic'), { text: 'x', editedAt: Date.now() })));
+await check('editing cannot change who sent it', () => assertFails(updateDoc(doc(alice, 'chatRooms', 'r1', 'messages', 'fresh'), { text: 'x', senderId: 'bob' })));
+await check('a member can mark the chat seen and show typing', () => assertSucceeds(updateDoc(doc(bob, 'chatRooms', 'r1'), { 'readUpTo.bob': Date.now(), 'readAt.bob': Date.now(), 'typing.bob': Date.now() })));
+
 await env.cleanup();
 for (const [status, name] of results) console.log(`${status.padEnd(4)} ${name}`);
 const failed = results.filter(r => r[0] !== 'ok').length;

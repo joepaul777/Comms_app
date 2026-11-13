@@ -21,6 +21,15 @@ class MessageModel {
   /// Only used by the offline (nearby) chat, which never leaves the device.
   final String? localFilePath;
 
+  /// Reactions: user id -> emoji.
+  final Map<String, String> reactions;
+
+  /// When the text was last edited, if ever.
+  final DateTime? editedAt;
+
+  /// Still on its way to the server (never stored).
+  final bool pending;
+
   MessageModel({
     required this.id,
     required this.senderId,
@@ -37,7 +46,14 @@ class MessageModel {
     this.mediaSize,
     this.durationMs,
     this.localFilePath,
+    this.reactions = const {},
+    this.pending = false,
+    this.editedAt,
   });
+
+  /// Your own text message, sent recently enough to change.
+  bool canEdit(String uid, Duration window) =>
+      senderId == uid && type == MessageType.text && !pending && DateTime.now().difference(timestamp) < window;
 
   bool get isMedia => type == MessageType.image || type == MessageType.video || type == MessageType.audio;
 
@@ -64,7 +80,7 @@ class MessageModel {
     };
   }
 
-  factory MessageModel.fromMap(Map<String, dynamic> map) {
+  factory MessageModel.fromMap(Map<String, dynamic> map, {bool pending = false}) {
     return MessageModel(
       id: map['id'] ?? '',
       senderId: map['senderId'] ?? '',
@@ -86,6 +102,12 @@ class MessageModel {
       mediaSize: (map['mediaSize'] as num?)?.toInt(),
       durationMs: (map['durationMs'] as num?)?.toInt(),
       localFilePath: map['localFilePath'],
+      reactions: {
+        for (final e in ((map['reactions'] as Map?) ?? const {}).entries)
+          if (e.value is String) e.key.toString(): e.value as String,
+      },
+      pending: pending,
+      editedAt: map['editedAt'] is int ? DateTime.fromMillisecondsSinceEpoch(map['editedAt']) : null,
     );
   }
 }

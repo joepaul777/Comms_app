@@ -1,5 +1,7 @@
 import 'dart:async';
 import 'dart:io';
+import 'dart:isolate';
+import 'dart:ui' show IsolateNameServer;
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:firebase_core/firebase_core.dart';
@@ -42,6 +44,10 @@ class NotificationTap {
   final String action; // '', answer, decline
   NotificationTap(this.type, this.id, this.action);
 }
+
+/// The running app listens here, so a push picked up by the background handler can
+/// be passed to it. Only the app knows which chat is on screen.
+const _mainPortName = 'comms_main_isolate';
 
 int callNotificationId(String callId) => callId.hashCode & 0x7fffffff;
 int chatNotificationId(String roomId) => roomId.hashCode & 0x7fffffff;
@@ -163,6 +169,12 @@ Future<void> firebaseMessagingBackgroundHandler(RemoteMessage message) async {
   final data = message.data;
   switch (data['type']) {
     case 'chat':
+      final app = IsolateNameServer.lookupPortByName(_mainPortName);
+      if (app != null) {
+        // The app is running; let it decide (no banner for the chat you're in).
+        app.send(Map<String, dynamic>.from(data));
+        return;
+      }
       await _showChat(data);
       // Save the photo, video or voice note now, while the link still works.
       await MediaService.prefetch(
@@ -223,8 +235,34 @@ class NotificationService {
   /// Called by the app when a push for a chat arrives while it is open.
   void Function(Map<String, dynamic> data)? onForegroundChat;
 
+  final ReceivePort _port = ReceivePort();
+  final Set<String> _handledMessages = {};
+
+  /// One place decides about every chat push, however it arrived.
+  void _handleChat(Map<String, dynamic> data) {
+    final messageId = data['messageId']?.toString() ?? '';
+    if (messageId.isNotEmpty && !_handledMessages.add(messageId)) return; // already handled
+    final looking = WidgetsBinding.instance.lifecycleState == AppLifecycleState.resumed;
+    final inThatChat = looking && data['id'] == activeChatRoomId;
+    if (!inThatChat) {
+      _showChat(data);
+      if (looking) onForegroundChat?.call(data);
+    }
+    MediaService.prefetch(
+      url: data['mediaUrl'] ?? '',
+      messageId: messageId,
+      name: data['mediaName'] ?? '',
+      type: data['mediaType'] ?? '',
+    );
+  }
+
   Future<void> initialize() async {
     FirebaseMessaging.onBackgroundMessage(firebaseMessagingBackgroundHandler);
+    IsolateNameServer.removePortNameMapping(_mainPortName);
+    IsolateNameServer.registerPortWithName(_port.sendPort, _mainPortName);
+    _port.listen((raw) {
+      if (raw is Map) _handleChat(Map<String, dynamic>.from(raw));
+    });
     await _initPlugin(onTap: _onTap);
 
     final launch = await _plugin.getNotificationAppLaunchDetails();
@@ -243,16 +281,7 @@ class NotificationService {
     FirebaseMessaging.onMessage.listen((message) {
       final data = message.data;
       if (data['type'] == 'chat') {
-        if (data['id'] != activeChatRoomId) {
-          _showChat(data);
-          onForegroundChat?.call(data);
-        }
-        MediaService.prefetch(
-          url: data['mediaUrl'] ?? '',
-          messageId: data['messageId'] ?? '',
-          name: data['mediaName'] ?? '',
-          type: data['mediaType'] ?? '',
-        );
+        _handleChat(data);
       } else if (data['type'] == 'call_update') {
         _plugin.cancel(callNotificationId(data['id'] ?? ''));
       }

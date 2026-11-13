@@ -16,6 +16,14 @@ class Composer extends StatefulWidget {
   final VoidCallback onAttach;
   final Future<void> Function(File file, Duration length) onSendVoice;
   final MessageModel? replyTo;
+
+  /// A message being edited; its words fill the box and sending saves them.
+  final MessageModel? editing;
+  final Future<bool> Function(String text)? onSaveEdit;
+  final VoidCallback? onCancelEdit;
+
+  /// Called with true while the person types, and false once they stop.
+  final void Function(bool typing)? onTyping;
   final VoidCallback onCancelReply;
   const Composer({
     super.key,
@@ -23,6 +31,10 @@ class Composer extends StatefulWidget {
     required this.onAttach,
     required this.onSendVoice,
     required this.replyTo,
+    this.onTyping,
+    this.editing,
+    this.onSaveEdit,
+    this.onCancelEdit,
     required this.onCancelReply,
   });
 
@@ -43,15 +55,54 @@ class _ComposerState extends State<Composer> with SingleTickerProviderStateMixin
   StreamSubscription<Amplitude>? _ampSub;
   final List<double> _levels = List.filled(24, 0.08, growable: true);
   bool _sending = false;
+  Timer? _idle;
+  DateTime? _lastTypingPing;
+
+  @override
+  void initState() {
+    super.initState();
+    _text.addListener(_onTextChanged);
+  }
+
+  void _onTextChanged() {
+    if (_text.text.trim().isEmpty) {
+      _stopTyping();
+      return;
+    }
+    final now = DateTime.now();
+    // Tell the others at most every 3 seconds, and stop 4 seconds after the last key.
+    if (_lastTypingPing == null || now.difference(_lastTypingPing!) > const Duration(seconds: 3)) {
+      _lastTypingPing = now;
+      widget.onTyping?.call(true);
+    }
+    _idle?.cancel();
+    _idle = Timer(const Duration(seconds: 4), _stopTyping);
+  }
+
+  void _stopTyping() {
+    _idle?.cancel();
+    if (_lastTypingPing == null) return;
+    _lastTypingPing = null;
+    widget.onTyping?.call(false);
+  }
 
   @override
   void didUpdateWidget(covariant Composer old) {
     super.didUpdateWidget(old);
     if (widget.replyTo != null && old.replyTo?.id != widget.replyTo!.id) _focus.requestFocus();
+    final editing = widget.editing;
+    if (editing != null && old.editing?.id != editing.id) {
+      _text.text = editing.text;
+      _text.selection = TextSelection.collapsed(offset: editing.text.length);
+      _focus.requestFocus();
+    } else if (editing == null && old.editing != null) {
+      _text.clear();
+    }
   }
 
   @override
   void dispose() {
+    _stopTyping();
     _ticker?.cancel();
     _ampSub?.cancel();
     _recorder.dispose();
@@ -65,6 +116,20 @@ class _ComposerState extends State<Composer> with SingleTickerProviderStateMixin
     final value = _text.text.trim();
     if (value.isEmpty || _sending) return;
     _sending = true;
+    final editing = widget.editing;
+    if (editing != null) {
+      if (value != editing.text) {
+        final saved = await (widget.onSaveEdit?.call(value) ?? Future.value(false));
+        if (!saved) {
+          _sending = false;
+          return;
+        }
+      } else {
+        widget.onCancelEdit?.call();
+      }
+      _sending = false;
+      return;
+    }
     _text.clear();
     final ok = await widget.onSendText(value);
     if (!ok && mounted && _text.text.isEmpty) {
@@ -143,7 +208,11 @@ class _ComposerState extends State<Composer> with SingleTickerProviderStateMixin
             AnimatedSize(
               duration: const Duration(milliseconds: 220),
               curve: Curves.easeOutCubic,
-              child: widget.replyTo == null ? const SizedBox(width: double.infinity) : _ReplyBanner(message: widget.replyTo!, onClose: widget.onCancelReply),
+              child: widget.editing != null
+                  ? _ReplyBanner(key: const ValueKey('edit'), message: widget.editing!, onClose: widget.onCancelEdit ?? () {}, editing: true)
+                  : widget.replyTo == null
+                      ? const SizedBox(width: double.infinity)
+                      : _ReplyBanner(key: ValueKey('reply-${widget.replyTo!.id}'), message: widget.replyTo!, onClose: widget.onCancelReply),
             ),
             AnimatedSwitcher(
               duration: const Duration(milliseconds: 220),
@@ -266,7 +335,8 @@ class _ComposerState extends State<Composer> with SingleTickerProviderStateMixin
 class _ReplyBanner extends StatelessWidget {
   final MessageModel message;
   final VoidCallback onClose;
-  const _ReplyBanner({required this.message, required this.onClose});
+  final bool editing;
+  const _ReplyBanner({super.key, required this.message, required this.onClose, this.editing = false});
 
   @override
   Widget build(BuildContext context) {
@@ -280,13 +350,13 @@ class _ReplyBanner extends StatelessWidget {
       ),
       child: Row(
         children: [
-          const Icon(Icons.reply_rounded, color: AppColors.primary, size: 18),
+          Icon(editing ? Icons.edit_rounded : Icons.reply_rounded, color: AppColors.primary, size: 18),
           const SizedBox(width: 8),
           Expanded(
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Text('Replying to ${message.senderName}', style: AppTheme.body(12.5, weight: FontWeight.w600, color: AppColors.primary)),
+                Text(editing ? 'Editing message' : 'Replying to ${message.senderName}', style: AppTheme.body(12.5, weight: FontWeight.w600, color: AppColors.primary)),
                 Text(
                   message.type == MessageType.text ? message.text : _label(message.type),
                   maxLines: 1,

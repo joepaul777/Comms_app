@@ -102,6 +102,13 @@ service cloud.firestore {
                     && (resource.data.type != 'group' || resource.data.get('adminId', '') == me());
 
       match /messages/{messageId} {
+        function ownReactionOnly() {
+          let before = resource.data.get('reactions', {});
+          let after = request.resource.data.get('reactions', {});
+          return after.diff(before).affectedKeys().hasOnly([me()])
+                 && (!(me() in after) || (after[me()] is string && after[me()].size() <= 16));
+        }
+
         allow read: if signedIn() && inRoom(roomId);
         allow create: if signedIn()
                       && inRoom(roomId)
@@ -112,9 +119,18 @@ service cloud.firestore {
                       && request.resource.data.type in ['text', 'image', 'video', 'audio', 'gif', 'system']
                       // written in the same batch as the sender's rate-limit update
                       && getAfter(/databases/$(database)/documents/users/$(me())).data.lastMessageAt == request.time;
-        // only "seen" style changes, by people in the chat
+        // people in the chat may mark it seen and set or remove their own reaction;
+        // the sender may change the words of a text message for 16 minutes after sending
         allow update: if signedIn() && inRoom(roomId)
-                      && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['isRead', 'readBy']);
+                      && ((request.resource.data.diff(resource.data).affectedKeys().hasOnly(['isRead', 'readBy', 'reactions'])
+                           && ownReactionOnly())
+                          || (resource.data.senderId == me()
+                              && resource.data.type == 'text'
+                              && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['text', 'editedAt'])
+                              && request.resource.data.text is string
+                              && request.resource.data.text.size() > 0
+                              && request.resource.data.text.size() <= 4000
+                              && request.time.toMillis() - resource.data.timestamp < 16 * 60 * 1000));
         // your own messages; in a two-person chat either person can clear the whole chat;
         // in a group the admin can.
         allow delete: if signedIn() && inRoom(roomId)

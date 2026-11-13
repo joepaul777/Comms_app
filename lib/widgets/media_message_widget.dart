@@ -7,10 +7,20 @@ import '../theme/app_colors.dart';
 import '../theme/app_theme.dart';
 import 'full_screen_image_viewer.dart';
 
+/// Where a message's media is up to on this phone.
+class MediaState {
+  final File? file;
+  final double? progress; // set while downloading
+  final bool expired; // the link is gone and this phone never got a copy
+  final bool failed; // the download did not work but may on a retry
+  final VoidCallback retry;
+  const MediaState({this.file, this.progress, this.expired = false, this.failed = false, required this.retry});
+}
+
 /// Loads this phone's copy of a message's media, downloading it the first time it is seen.
 class MediaLoader extends StatefulWidget {
   final MessageModel message;
-  final Widget Function(BuildContext context, File? file, double? progress, bool expired) builder;
+  final Widget Function(BuildContext context, MediaState state) builder;
   const MediaLoader({super.key, required this.message, required this.builder});
 
   @override
@@ -21,6 +31,8 @@ class _MediaLoaderState extends State<MediaLoader> {
   File? _file;
   double? _progress;
   bool _expired = false;
+  bool _failed = false;
+  bool _retried = false;
 
   @override
   void initState() {
@@ -31,7 +43,7 @@ class _MediaLoaderState extends State<MediaLoader> {
   @override
   void didUpdateWidget(covariant MediaLoader old) {
     super.didUpdateWidget(old);
-    if (old.message.id != widget.message.id || (old.message.mediaUrl == null && widget.message.mediaUrl != null)) _load();
+    if (old.message.id != widget.message.id || old.message.mediaUrl != widget.message.mediaUrl) _load();
   }
 
   Future<void> _load() async {
@@ -41,56 +53,99 @@ class _MediaLoaderState extends State<MediaLoader> {
       if (mounted) setState(() => _file = local);
       return;
     }
-    if (widget.message.mediaUrl == null) return;
+    if (widget.message.mediaUrl == null || widget.message.mediaUrl!.isEmpty) return;
     if (DateTime.now().isAfter(widget.message.mediaExpiresAt)) {
       if (mounted) setState(() => _expired = true);
       return;
     }
-    if (mounted) setState(() => _progress = 0);
+    if (mounted) {
+      setState(() {
+        _progress = 0;
+        _failed = false;
+      });
+    }
     final file = await media.download(widget.message, onProgress: (p) {
       if (mounted) setState(() => _progress = p);
     });
     if (!mounted) return;
+    if (file == null && !_retried) {
+      // One quiet retry covers a brief drop in connection.
+      _retried = true;
+      await Future.delayed(const Duration(seconds: 2));
+      if (mounted) await _load();
+      return;
+    }
+    final gone = file == null && DateTime.now().isAfter(widget.message.mediaExpiresAt.subtract(const Duration(minutes: 2)));
     setState(() {
       _file = file;
       _progress = null;
-      _expired = file == null && DateTime.now().isAfter(widget.message.mediaExpiresAt.subtract(const Duration(minutes: 5)));
+      _expired = gone;
+      _failed = file == null && !gone;
     });
   }
 
+  void _retry() {
+    _retried = true;
+    _load();
+  }
+
   @override
-  Widget build(BuildContext context) => widget.builder(context, _file, _progress, _expired);
+  Widget build(BuildContext context) => widget.builder(
+        context,
+        MediaState(file: _file, progress: _progress, expired: _expired, failed: _failed, retry: _retry),
+      );
 }
 
 class _Placeholder extends StatelessWidget {
   final IconData icon;
   final String label;
   final double? progress;
-  const _Placeholder({required this.icon, required this.label, this.progress});
+  final VoidCallback? onTap;
+  const _Placeholder({required this.icon, required this.label, this.progress, this.onTap});
 
   @override
   Widget build(BuildContext context) {
-    return Container(
-      color: AppColors.bgElevated,
-      child: Center(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            if (progress != null)
-              SizedBox(
-                width: 36,
-                height: 36,
-                child: CircularProgressIndicator(value: progress! > 0 ? progress : null, strokeWidth: 3),
-              )
-            else
-              Icon(icon, color: AppColors.textMuted, size: 32),
-            const SizedBox(height: 8),
-            Text(label, style: AppTheme.body(12.5, color: AppColors.textMuted), textAlign: TextAlign.center),
-          ],
+    return GestureDetector(
+      onTap: onTap,
+      child: Container(
+        color: AppColors.bgElevated,
+        child: Center(
+          child: AnimatedSwitcher(
+            duration: const Duration(milliseconds: 250),
+            child: Column(
+              key: ValueKey('$label${progress != null}'),
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                if (progress != null)
+                  SizedBox(
+                    width: 36,
+                    height: 36,
+                    child: CircularProgressIndicator(value: progress! > 0 ? progress : null, strokeWidth: 3),
+                  )
+                else
+                  Icon(icon, color: onTap != null ? AppColors.primary : AppColors.textMuted, size: 32),
+                const SizedBox(height: 8),
+                Text(label, style: AppTheme.body(12.5, color: AppColors.textMuted), textAlign: TextAlign.center),
+              ],
+            ),
+          ),
         ),
       ),
     );
   }
+}
+
+/// Placeholder for media that is not on this phone yet.
+_Placeholder _placeholderFor(MediaState s, {required String noun, required IconData icon, required IconData goneIcon}) {
+  if (s.expired) return _Placeholder(icon: goneIcon, label: '$noun expired');
+  if (s.failed) {
+    return _Placeholder(icon: Icons.refresh_rounded, label: 'Couldn\'t load ${noun.toLowerCase()}\nTap to retry', onTap: s.retry);
+  }
+  if (s.progress != null) {
+    final pct = s.progress! > 0 ? ' ${(s.progress! * 100).round()}%' : '';
+    return _Placeholder(icon: icon, label: 'Loading ${noun.toLowerCase()}…$pct', progress: s.progress);
+  }
+  return _Placeholder(icon: icon, label: noun);
 }
 
 class ImageMessage extends StatelessWidget {
@@ -101,15 +156,12 @@ class ImageMessage extends StatelessWidget {
   Widget build(BuildContext context) {
     return MediaLoader(
       message: message,
-      builder: (context, file, progress, expired) {
+      builder: (context, state) {
+        final file = state.file;
         if (file == null) {
           return AspectRatio(
             aspectRatio: 4 / 3,
-            child: _Placeholder(
-              icon: expired ? Icons.hide_image_outlined : Icons.image_outlined,
-              label: expired ? 'Photo expired' : (progress != null ? 'Saving photo…' : 'Photo'),
-              progress: expired ? null : progress,
-            ),
+            child: _placeholderFor(state, noun: 'Photo', icon: Icons.image_outlined, goneIcon: Icons.hide_image_outlined),
           );
         }
         return GestureDetector(
@@ -123,7 +175,16 @@ class ImageMessage extends StatelessWidget {
             tag: 'img-${message.id}',
             child: ConstrainedBox(
               constraints: const BoxConstraints(maxHeight: 360, minHeight: 120),
-              child: Image.file(file, fit: BoxFit.cover, width: double.infinity, cacheWidth: 900),
+              child: Image.file(
+                file,
+                fit: BoxFit.cover,
+                width: double.infinity,
+                cacheWidth: 900,
+                // Fade the photo in once it has been decoded.
+                frameBuilder: (_, child, frame, sync) => sync
+                    ? child
+                    : AnimatedOpacity(opacity: frame == null ? 0 : 1, duration: const Duration(milliseconds: 300), child: child),
+              ),
             ),
           ),
         );
@@ -140,15 +201,12 @@ class VideoMessage extends StatelessWidget {
   Widget build(BuildContext context) {
     return MediaLoader(
       message: message,
-      builder: (context, file, progress, expired) {
+      builder: (context, state) {
+        final file = state.file;
         return AspectRatio(
           aspectRatio: 16 / 11,
           child: file == null
-              ? _Placeholder(
-                  icon: expired ? Icons.videocam_off_outlined : Icons.videocam_outlined,
-                  label: expired ? 'Video expired' : (progress != null ? 'Saving video… ${((progress) * 100).round()}%' : 'Video'),
-                  progress: expired ? null : progress,
-                )
+              ? _placeholderFor(state, noun: 'Video', icon: Icons.videocam_outlined, goneIcon: Icons.videocam_off_outlined)
               : GestureDetector(
                   onTap: () => Navigator.of(context).push(MaterialPageRoute(builder: (_) => VideoViewer(file: file))),
                   child: Stack(

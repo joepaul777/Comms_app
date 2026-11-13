@@ -92,8 +92,8 @@ class ChatService {
         .collection('messages')
         .orderBy('timestamp', descending: true)
         .limit(limit)
-        .snapshots()
-        .map((s) => s.docs.map((d) => MessageModel.fromMap(d.data())).toList());
+        .snapshots(includeMetadataChanges: true)
+        .map((s) => s.docs.map((d) => MessageModel.fromMap(d.data(), pending: d.metadata.hasPendingWrites)).toList());
   }
 
   static String previewFor(MessageType type, String text) {
@@ -188,6 +188,53 @@ class ChatService {
       await _db.collection('chatRooms').doc(room.id).update({'unreadCount.$uid': 0});
     } catch (e) {
       debugPrint('markRead failed: $e');
+    }
+  }
+
+  /// Records that this person has seen everything up to [upTo] (a message timestamp).
+  Future<void> markSeen(String roomId, String uid, int upTo) async {
+    try {
+      await _db.collection('chatRooms').doc(roomId).update({
+        'readUpTo.$uid': upTo,
+        'readAt.$uid': DateTime.now().millisecondsSinceEpoch,
+        'unreadCount.$uid': 0,
+      });
+    } catch (e) {
+      debugPrint('markSeen failed: $e');
+    }
+  }
+
+  /// Changes the words of one of your own recent text messages.
+  Future<void> editMessage(ChatRoomModel room, MessageModel message, String text) {
+    final batch = _db.batch();
+    final roomRef = _db.collection('chatRooms').doc(room.id);
+    batch.update(roomRef.collection('messages').doc(message.id), {
+      'text': text,
+      'editedAt': DateTime.now().millisecondsSinceEpoch,
+    });
+    // Keep the chat list preview right when the newest message is the one edited.
+    if (room.lastMessageSenderId == message.senderId &&
+        room.lastMessageTime.millisecondsSinceEpoch == message.timestamp.millisecondsSinceEpoch) {
+      batch.update(roomRef, {'lastMessage': text});
+    }
+    return batch.commit();
+  }
+
+  /// Sets this person's reaction to a message, or removes it when [emoji] is null.
+  Future<void> react(String roomId, String messageId, String uid, String? emoji) {
+    return _db.collection('chatRooms').doc(roomId).collection('messages').doc(messageId).update({
+      'reactions.$uid': emoji ?? FieldValue.delete(),
+    });
+  }
+
+  /// Lets the others in the chat see that this person is typing.
+  Future<void> setTyping(String roomId, String uid, bool typing) async {
+    try {
+      await _db.collection('chatRooms').doc(roomId).update({
+        'typing.$uid': typing ? DateTime.now().millisecondsSinceEpoch : FieldValue.delete(),
+      });
+    } catch (_) {
+      // Only a hint; never worth bothering the person about.
     }
   }
 

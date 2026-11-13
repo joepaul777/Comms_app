@@ -15,6 +15,9 @@ class AppConfig {
   /// How long an unanswered call keeps ringing.
   static const Duration ringTimeout = Duration(seconds: 40);
 
+  /// How long after sending a text message it can still be edited (the database rule allows 16 min).
+  static const Duration editWindow = Duration(minutes: 15);
+
   /// Local sending limits (the database enforces the same ones).
   static const Duration minMessageGap = Duration(milliseconds: 800);
   static const int messagesPerMinute = 30;

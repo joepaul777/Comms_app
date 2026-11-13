@@ -65,7 +65,7 @@ class MediaService {
     return source.copy(target.path);
   }
 
-  /// Uploads to tmpfiles.org and returns a direct download link.
+  /// Uploads to tmpfiles.org and returns the file's direct, signed download link.
   Future<String> upload(File file, String fileName, {void Function(double)? onProgress, CancelToken? cancel}) async {
     final size = await file.length();
     if (size > AppConfig.maxUploadBytes) throw MediaTooLargeException();
@@ -80,17 +80,51 @@ class MediaService {
     );
     final data = res.data;
     if (data is Map && data['status'] == 'success') {
-      return directLink(data['data']['url'] as String);
+      final page = data['data']['url'] as String;
+      // Receivers can still find the file from the page link if this lookup fails.
+      return await resolveLink(page) ?? page;
     }
     throw Exception('Upload failed');
   }
 
-  /// tmpfiles.org hands back a page link; the file itself lives under /dl/.
-  static String directLink(String pageUrl) {
-    final uri = Uri.parse(pageUrl);
+  static final RegExp _signedPath = RegExp(r'^/dl/\d+\.[0-9a-f]+/');
+
+  /// tmpfiles.org links to a file are signed: `/dl/<expiry>.<signature>/<id>/<name>`.
+  static bool isSignedLink(String url) {
+    final uri = Uri.tryParse(url);
+    return uri != null && uri.host == 'tmpfiles.org' && _signedPath.hasMatch(uri.path);
+  }
+
+  /// The tmpfiles page for a file, from either its page link or an old-style /dl/ link.
+  static String pageLinkFor(String url) {
+    final uri = Uri.parse(url);
     final segments = uri.pathSegments.where((s) => s.isNotEmpty).toList();
-    if (segments.isNotEmpty && segments.first == 'dl') return uri.replace(scheme: 'https').toString();
-    return Uri(scheme: 'https', host: uri.host, pathSegments: ['dl', ...segments]).toString();
+    if (segments.isNotEmpty && segments.first == 'dl') segments.removeAt(0);
+    return Uri(scheme: 'https', host: uri.host, pathSegments: segments).toString();
+  }
+
+  /// Picks the file's download link out of a tmpfiles page.
+  static String? signedLinkIn(String html) {
+    final match = RegExp(r'href="(https://tmpfiles\.org/dl/[^"]+)"').firstMatch(html);
+    final link = match?.group(1)?.replaceAll('&amp;', '&');
+    return link != null && isSignedLink(link) ? link : null;
+  }
+
+  /// Turns any tmpfiles link into the link that serves the file itself.
+  /// Returns null once the file has expired.
+  Future<String?> resolveLink(String url) async {
+    if (isSignedLink(url)) return url;
+    try {
+      final res = await _dio.get<String>(
+        pageLinkFor(url),
+        options: Options(responseType: ResponseType.plain, validateStatus: (s) => s != null && s < 500),
+      );
+      if (res.statusCode != 200 || res.data == null) return null;
+      return signedLinkIn(res.data!);
+    } catch (e) {
+      debugPrint('media link lookup failed: $e');
+      return null;
+    }
   }
 
   /// Downloads a message's media to this phone once. Safe to call many times.
@@ -112,8 +146,10 @@ class MediaService {
   Future<File?> fetchTo(String url, File target, {void Function(double)? onProgress}) async {
     final partial = File('${target.path}.part');
     try {
+      final link = await resolveLink(url);
+      if (link == null) return null;
       final res = await _dio.download(
-        url,
+        link,
         partial.path,
         onReceiveProgress: (got, total) {
           if (total > 0) onProgress?.call(got / total);

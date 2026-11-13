@@ -95,12 +95,21 @@ void main() {
   });
 
   group('tmpfiles links', () {
-    test('page links become direct download links', () {
-      expect(MediaService.directLink('http://tmpfiles.org/12345/photo.jpg'), 'https://tmpfiles.org/dl/12345/photo.jpg');
-      expect(MediaService.directLink('https://tmpfiles.org/12345/voice.m4a'), 'https://tmpfiles.org/dl/12345/voice.m4a');
+    const signed = 'https://tmpfiles.org/dl/1794595772.2f95534620e118f7/wwAf7lVXXAi8/voice.m4a';
+    test('signed file links are recognised', () {
+      expect(MediaService.isSignedLink(signed), isTrue);
+      expect(MediaService.isSignedLink('https://tmpfiles.org/dl/12345/photo.jpg'), isFalse);
+      expect(MediaService.isSignedLink('https://tmpfiles.org/wwAf7lVXXAi8/voice.m4a'), isFalse);
+      expect(MediaService.isSignedLink('https://evil.com/dl/1.ab/x/y'), isFalse);
     });
-    test('direct links are left as they are', () {
-      expect(MediaService.directLink('https://tmpfiles.org/dl/12345/a.mp4'), 'https://tmpfiles.org/dl/12345/a.mp4');
+    test('old links lead back to the file page', () {
+      expect(MediaService.pageLinkFor('http://tmpfiles.org/dl/12345/photo.jpg'), 'https://tmpfiles.org/12345/photo.jpg');
+      expect(MediaService.pageLinkFor('https://tmpfiles.org/wwAf7lVXXAi8/voice.m4a'), 'https://tmpfiles.org/wwAf7lVXXAi8/voice.m4a');
+    });
+    test('the download link is found on the file page', () {
+      const html = '<p><a class="download" href="$signed">Download (2.93 KB)</a></p>';
+      expect(MediaService.signedLinkIn(html), signed);
+      expect(MediaService.signedLinkIn('<a href="https://tmpfiles.org/dl/1/x.jpg">'), isNull);
     });
     test('file types are worked out safely', () {
       expect(MediaService.extensionOf('abc.JPG', MessageType.image), 'jpg');

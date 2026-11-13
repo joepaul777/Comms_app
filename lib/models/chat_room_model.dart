@@ -11,6 +11,14 @@ class ChatRoomModel {
   final Map<String, int> unreadCount;
   final DateTime createdAt;
 
+  /// Who is typing right now: user id -> a value that changes while they keep typing.
+  final Map<String, int> typing;
+
+  /// Read receipts: user id -> timestamp of the newest message they have seen,
+  /// and when (by their clock) they saw it.
+  final Map<String, int> readUpTo;
+  final Map<String, int> readAt;
+
   ChatRoomModel({
     required this.id,
     required this.type,
@@ -23,6 +31,9 @@ class ChatRoomModel {
     DateTime? lastMessageTime,
     this.unreadCount = const {},
     DateTime? createdAt,
+    this.typing = const {},
+    this.readUpTo = const {},
+    this.readAt = const {},
   })  : lastMessageTime = lastMessageTime ?? DateTime.now(),
         createdAt = createdAt ?? DateTime.now();
 
@@ -62,6 +73,12 @@ class ChatRoomModel {
       createdAt: map['createdAt'] != null
           ? DateTime.fromMillisecondsSinceEpoch(map['createdAt'])
           : DateTime.now(),
+      readUpTo: _ints(map['readUpTo']),
+      readAt: _ints(map['readAt']),
+      typing: {
+        for (final e in ((map['typing'] as Map?) ?? const {}).entries)
+          if (e.value is num) e.key.toString(): (e.value as num).toInt(),
+      },
     );
   }
 
@@ -90,6 +107,11 @@ class ChatRoomModel {
   }
 
   bool get isGroup => type == ChatRoomType.group;
+
+  static Map<String, int> _ints(dynamic raw) => {
+        for (final e in ((raw as Map?) ?? const {}).entries)
+          if (e.value is num) e.key.toString(): (e.value as num).toInt(),
+      };
 }
 
 enum ChatRoomType {

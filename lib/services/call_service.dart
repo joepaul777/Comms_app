@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_ringtone_player/flutter_ringtone_player.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'package:permission_handler/permission_handler.dart';
@@ -22,7 +23,20 @@ enum CallPhase { idle, outgoing, incoming, connecting, connected, ended }
 /// other phone always learns what happened: declined, cancelled, no answer, busy,
 /// hung up or connection lost.
 class CallService extends ChangeNotifier {
-  CallService._();
+  CallService._() {
+    addListener(_syncLockScreen);
+  }
+
+  static const _lockScreen = MethodChannel('comms/lock_screen');
+  bool _overLockScreen = false;
+
+  /// Only a ringing or live call may show over the lock screen.
+  void _syncLockScreen() {
+    final inCall = phase != CallPhase.idle && phase != CallPhase.ended;
+    if (inCall == _overLockScreen) return;
+    _overLockScreen = inCall;
+    _lockScreen.invokeMethod('setInCall', inCall).catchError((_) {});
+  }
   static final CallService instance = CallService._();
   factory CallService() => instance;
 

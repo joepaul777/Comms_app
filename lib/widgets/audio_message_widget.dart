@@ -69,7 +69,10 @@ class _AudioMessageState extends State<AudioMessage> {
     final accent = widget.mine ? AppColors.textDark : AppColors.primary;
     return MediaLoader(
       message: widget.message,
-      builder: (context, file, progress, expired) {
+      builder: (context, state) {
+        final file = state.file;
+        final progress = state.progress;
+        final expired = state.expired;
         final total = _duration ?? Duration.zero;
         final fraction = total.inMilliseconds == 0 ? 0.0 : (_position.inMilliseconds / total.inMilliseconds).clamp(0.0, 1.0);
         return SizedBox(
@@ -77,7 +80,7 @@ class _AudioMessageState extends State<AudioMessage> {
           child: Row(
             children: [
               GestureDetector(
-                onTap: file == null ? null : () => _toggle(file.path),
+                onTap: file != null ? () => _toggle(file.path) : (state.failed ? state.retry : null),
                 child: Container(
                   width: 40,
                   height: 40,
@@ -90,7 +93,9 @@ class _AudioMessageState extends State<AudioMessage> {
                           padding: const EdgeInsets.all(11),
                           child: expired
                               ? Icon(Icons.mic_off_rounded, size: 18, color: accent)
-                              : CircularProgressIndicator(strokeWidth: 2, color: accent, value: (progress ?? 0) > 0 ? progress : null),
+                              : state.failed
+                                  ? Icon(Icons.refresh_rounded, size: 18, color: accent)
+                                  : CircularProgressIndicator(strokeWidth: 2, color: accent, value: (progress ?? 0) > 0 ? progress : null),
                         )
                       : AnimatedSwitcher(
                           duration: const Duration(milliseconds: 180),
@@ -112,7 +117,9 @@ class _AudioMessageState extends State<AudioMessage> {
                     Text(
                       expired && file == null
                           ? 'Voice message expired'
-                          : formatDuration(_isPlaying || _position > Duration.zero ? _position : total),
+                          : state.failed && file == null
+                              ? 'Couldn\'t load · tap to retry'
+                              : formatDuration(_isPlaying || _position > Duration.zero ? _position : total),
                       style: AppTheme.body(11.5, color: fg.withValues(alpha: 0.7)),
                     ),
                   ],
