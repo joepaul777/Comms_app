@@ -1,7 +1,7 @@
-import 'dart:io';
 import 'package:flutter/material.dart';
 import '../services/local_prefs.dart';
 import '../theme/app_colors.dart';
+import '../platform/platform.dart';
 
 /// Turns any photo into something that fits Comms: colours are softened and warmed
 /// towards the app's yellow, so a bright beach photo and a dark city photo both end
@@ -21,7 +21,7 @@ class ThemedWallpaper extends StatelessWidget {
   final bool tint;
   const ThemedWallpaper({super.key, required this.photo, required this.dim, this.tint = true});
 
-  Widget _image(double width) => Image.file(photo, fit: BoxFit.cover, cacheWidth: width.round(), gaplessPlayback: true);
+  Widget _image(double width) => Image(image: localImage(photo, cacheWidth: width.round()), fit: BoxFit.cover, gaplessPlayback: true);
 
   @override
   Widget build(BuildContext context) {

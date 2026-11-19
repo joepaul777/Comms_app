@@ -1,10 +1,10 @@
-import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:video_player/video_player.dart';
 import '../../theme/app_colors.dart';
 import '../../theme/app_theme.dart';
 import '../../widgets/ui.dart';
+import '../../platform/platform.dart';
 
 /// What to do with the picked photo or video.
 class MediaPreviewResult {
@@ -32,7 +32,7 @@ class _MediaPreviewScreenState extends State<MediaPreviewScreen> {
   void initState() {
     super.initState();
     if (widget.isVideo) {
-      _video = VideoPlayerController.file(widget.file)
+      _video = localVideo(widget.file)
         ..setLooping(true)
         ..initialize().then((_) {
           if (!mounted) return;
@@ -93,7 +93,7 @@ class _MediaPreviewScreenState extends State<MediaPreviewScreen> {
                             child: AspectRatio(aspectRatio: v.value.aspectRatio, child: VideoPlayer(v)),
                           )
                         : const CircularProgressIndicator())
-                    : InteractiveViewer(child: Image.file(widget.file, fit: BoxFit.contain)),
+                    : InteractiveViewer(child: Image(image: localImage(widget.file), fit: BoxFit.contain)),
               ),
             ),
             Padding(

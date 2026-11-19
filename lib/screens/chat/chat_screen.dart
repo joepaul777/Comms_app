@@ -1,5 +1,4 @@
 import 'dart:async';
-import 'dart:io';
 import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
 import 'package:image_picker/image_picker.dart';
@@ -28,6 +27,7 @@ import '../contacts/person_profile_screen.dart';
 import 'group_info_sheet.dart';
 import 'media_preview_screen.dart';
 import '../../services/local_prefs.dart';
+import '../../platform/platform.dart';
 
 class _Upload {
   final String id;
@@ -335,7 +335,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
         ? await picker.pickVideo(source: source, maxDuration: const Duration(minutes: 5))
         : await picker.pickImage(source: source, imageQuality: 82, maxWidth: 2048, maxHeight: 2048);
     if (picked == null) return;
-    final file = File(picked.path);
+    final file = await fileFromPicked(picked);
     if (await file.length() > AppConfig.maxUploadBytes) {
       if (mounted) showSnack(context, 'That file is too big. Files can be up to 95 MB.', error: true);
       return;
@@ -382,7 +382,9 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     if (last) await MediaService.instance.deleteCopy(m);
   }
 
-  Future<void> _sendVoice(File file, Duration length) => _sendMedia(file, MessageType.audio, 'voice.m4a', durationMs: length.inMilliseconds);
+  // Phones record .m4a; browsers record .webm. Both play everywhere.
+  Future<void> _sendVoice(File file, Duration length) =>
+      _sendMedia(file, MessageType.audio, 'voice.${MediaService.extensionOf(file.path, MessageType.audio)}', durationMs: length.inMilliseconds);
 
   Future<void> _sendMedia(File file, MessageType type, String name, {int? durationMs, int? viewLimit}) async {
     try {
@@ -534,7 +536,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     if (action == 'pick') {
       final picked = await ImagePicker().pickImage(source: ImageSource.gallery, maxWidth: 1600, maxHeight: 2800, imageQuality: 85);
       if (picked == null) return;
-      photo = File(picked.path);
+      photo = await fileFromPicked(picked);
     } else {
       photo = File(current!.path);
     }

@@ -1,3 +1,4 @@
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 import '../../models/chat_room_model.dart';
@@ -45,12 +46,15 @@ class _ChatListScreenState extends State<ChatListScreen> {
           PageHeader(
             title: 'Chats',
             actions: [
-              CircleIconButton(
-                icon: Icons.wifi_tethering_rounded,
-                tooltip: 'Chat nearby without internet',
-                onTap: () => Navigator.of(context).push(MaterialPageRoute(builder: (_) => const OfflineLobbyScreen())),
-              ),
-              const SizedBox(width: 8),
+              // Nearby chat needs the phone's own radios.
+              if (!kIsWeb) ...[
+                CircleIconButton(
+                  icon: Icons.wifi_tethering_rounded,
+                  tooltip: 'Chat nearby without internet',
+                  onTap: () => Navigator.of(context).push(MaterialPageRoute(builder: (_) => const OfflineLobbyScreen())),
+                ),
+                const SizedBox(width: 8),
+              ],
               CircleIconButton(icon: Icons.group_add_rounded, tooltip: 'New group', onTap: _newGroup),
             ],
           ),

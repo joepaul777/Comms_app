@@ -1,14 +1,13 @@
 import 'dart:convert';
-import 'dart:io';
 import 'package:flutter/foundation.dart';
-import 'package:path_provider/path_provider.dart';
+import '../platform/platform.dart';
 
 /// Small settings that live only on this phone, stored as a JSON file.
 class _LocalFile {
   final String name;
   _LocalFile(this.name);
 
-  Future<File> _file() async => File('${(await getApplicationSupportDirectory()).path}/$name');
+  Future<File> _file() async => File('${(await supportDirectory()).path}/$name');
 
   Future<Map<String, dynamic>> read() async {
     try {
@@ -80,6 +79,11 @@ class Wallpapers extends ChangeNotifier {
 
   Future<void> load() async {
     _data = await _store.read();
+    // Have the photos at hand before the first chat is drawn (a browser keeps them in its own storage).
+    for (final entry in _data.values) {
+      final path = entry is Map ? entry['path'] : null;
+      if (path is String) await File(path).exists();
+    }
     _loaded = true;
     notifyListeners();
   }
@@ -95,7 +99,7 @@ class Wallpapers extends ChangeNotifier {
 
   /// Copies the photo into the app's own folder so it survives the gallery changing.
   Future<void> set(String roomId, File photo, double dim, {bool tint = true}) async {
-    final dir = Directory('${(await getApplicationSupportDirectory()).path}/wallpapers');
+    final dir = Directory('${(await supportDirectory()).path}/wallpapers');
     if (!await dir.exists()) await dir.create(recursive: true);
     final old = of(roomId);
     final target = File('${dir.path}/${roomId}_${DateTime.now().millisecondsSinceEpoch}.jpg');

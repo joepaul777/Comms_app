@@ -1,4 +1,3 @@
-import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:video_player/video_player.dart';
@@ -7,6 +6,7 @@ import '../services/media_service.dart';
 import '../theme/app_colors.dart';
 import '../theme/app_theme.dart';
 import 'media_message_widget.dart';
+import '../platform/platform.dart';
 
 /// A view-once photo or video in the chat. It never shows a preview: the receiver taps
 /// to open it, and after the last view it just says "Opened".
@@ -157,7 +157,7 @@ class _ViewOnceViewerState extends State<ViewOnceViewer> {
     super.initState();
     _window.invokeMethod('setSecure', true).catchError((_) {});
     if (widget.isVideo) {
-      _video = VideoPlayerController.file(widget.file)
+      _video = localVideo(widget.file)
         ..initialize().then((_) {
           if (!mounted) return;
           setState(() {});
@@ -192,7 +192,7 @@ class _ViewOnceViewerState extends State<ViewOnceViewer> {
                           child: AspectRatio(aspectRatio: v.value.aspectRatio, child: VideoPlayer(v)),
                         )
                       : const CircularProgressIndicator())
-                  : InteractiveViewer(child: Image.file(widget.file, fit: BoxFit.contain)),
+                  : InteractiveViewer(child: Image(image: localImage(widget.file), fit: BoxFit.contain)),
             ),
             Positioned(
               top: 4,

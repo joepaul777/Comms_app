@@ -1,13 +1,16 @@
 import 'dart:async';
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import '../../main.dart';
 import '../../models/chat_room_model.dart';
 import '../../models/user_model.dart';
+import '../../platform/platform.dart';
 import '../../services/assistant_service.dart';
 import '../../services/call_service.dart';
 import '../../services/rate_limiter.dart';
 import '../../services/chat_service.dart';
+import '../../services/device_link.dart';
 import '../../services/e2e_service.dart';
 import '../../services/local_prefs.dart';
 import '../../services/notification_service.dart';
@@ -22,6 +25,7 @@ import '../call/call_screen.dart';
 import '../chat/chat_list_screen.dart';
 import '../chat/chat_screen.dart';
 import '../contacts/contacts_screen.dart';
+import '../link/link_device_screen.dart';
 import '../profile/profile_screen.dart';
 import '../update/update_sheet.dart';
 
@@ -53,6 +57,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   StreamSubscription? _incomingSub;
   StreamSubscription? _tapSub;
   StreamSubscription? _assistantSub;
+  StreamSubscription? _linkSub;
   UserModel? _me;
   int _tab = 0;
   ChatRoomModel? _openRoom; // the chat shown on the right on wide screens
@@ -91,6 +96,8 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     UserService.instance.movePrivateData(widget.uid);
     _setUpEncryption();
     NotificationService.instance.saveDeviceToken();
+    NotificationService.instance.startWatching(widget.uid);
+    _linkSub = DeviceLink.requests(widget.uid).listen(_askToLink);
     _calls.cleanupStale(widget.uid);
     _incomingSub = _calls.incomingCalls(widget.uid).listen((ringing) async {
       for (final call in ringing) {
@@ -100,11 +107,57 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     _tapSub = NotificationService.instance.taps.listen(_handleTap);
     final pending = NotificationService.instance.takePendingTap();
     if (pending != null) _handleTap(pending);
+    if (kIsWeb) return;
     Future.delayed(const Duration(seconds: 3), _offerUpdate);
     _assistantSub = AssistantService.instance.requests.listen(_handleAssistant);
     AssistantService.instance.takePending().then((r) {
       if (r != null) _handleAssistant(r);
     });
+  }
+
+  /// Another of this person's devices (a browser) wants to read their messages.
+  Future<void> _askToLink(LinkRequest request) async {
+    if (!mounted) return;
+    final ok = await showDialog<bool>(
+      context: context,
+      barrierDismissible: false,
+      builder: (d) => AlertDialog(
+        title: Text('Link ${request.device}?'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text('Comms there will be able to read and send your messages.'),
+            const SizedBox(height: 16),
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.symmetric(vertical: 14),
+              decoration: BoxDecoration(color: AppColors.bgAlt, borderRadius: BorderRadius.circular(16)),
+              child: Text(request.code, textAlign: TextAlign.center, style: AppTheme.display(32, weight: FontWeight.w900, color: AppColors.primary)),
+            ),
+            const SizedBox(height: 16),
+            Text(
+              'Only tap Link if you are setting this up yourself and the same code is on that screen.',
+              style: AppTheme.body(13.5, color: AppColors.textMuted, height: 1.45),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(d, false), child: const Text('Not me', style: TextStyle(color: AppColors.error))),
+          TextButton(onPressed: () => Navigator.pop(d, true), child: const Text('Link')),
+        ],
+      ),
+    );
+    if (ok != true) {
+      await DeviceLink.deny(widget.uid, request);
+      return;
+    }
+    try {
+      await DeviceLink.approve(widget.uid, request);
+      if (mounted) showSnack(context, 'Linked ${request.device}');
+    } catch (_) {
+      if (mounted) showSnack(context, 'Could not link. Try again from the browser.', error: true);
+    }
   }
 
   /// Publishes this phone's encryption key, so people can send it messages.
@@ -119,8 +172,21 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     final me = await UserService.instance.getUser(widget.uid, fresh: true).catchError((_) => null);
     if (mine == null || me == null || !mounted || me.publicKey == mine) return;
     // First time, or a fresh install / new phone: this phone takes over.
-    if (me.publicKey == null || E2E.instance.createdNow) {
+    if (me.publicKey == null || (E2E.instance.createdNow && !kIsWeb)) {
       await UserService.instance.setPublicKey(widget.uid, mine);
+      return;
+    }
+    // A browser never takes over quietly: it asks the phone for the key.
+    if (kIsWeb) {
+      final outcome = await navigatorKey.currentState?.push<LinkOutcome>(
+        MaterialPageRoute(fullscreenDialog: true, builder: (_) => LinkDeviceScreen(uid: widget.uid)),
+      );
+      if (outcome == LinkOutcome.linked) {
+        // Everything already on screen was drawn without the key; start again with it.
+        reloadApp();
+      } else if (outcome == LinkOutcome.startFresh) {
+        await UserService.instance.setPublicKey(widget.uid, mine);
+      }
       return;
     }
     // Comms was set up on another phone since this one was last used.
@@ -285,6 +351,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     _incomingSub?.cancel();
     _tapSub?.cancel();
     _assistantSub?.cancel();
+    _linkSub?.cancel();
     super.dispose();
   }
 

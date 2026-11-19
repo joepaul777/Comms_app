@@ -1,8 +1,7 @@
 import 'dart:convert';
-import 'dart:io';
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
-import 'package:path_provider/path_provider.dart';
+import '../platform/platform.dart';
 
 /// Locks Comms behind the phone's own screen lock (fingerprint, face, PIN or pattern).
 ///
@@ -25,7 +24,7 @@ class AppLock extends ChangeNotifier with WidgetsBindingObserver {
   bool get enabled => _enabled;
   bool get locked => _enabled && _locked;
 
-  Future<File> _file() async => File('${(await getApplicationSupportDirectory()).path}/security.json');
+  Future<File> _file() async => File('${(await supportDirectory()).path}/security.json');
 
   Future<void> load() async {
     try {

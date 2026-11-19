@@ -1,7 +1,9 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
+import 'package:flutter/foundation.dart';
 import 'package:google_sign_in/google_sign_in.dart';
 import '../models/user_model.dart';
+import 'e2e_service.dart';
 import 'notification_service.dart';
 import 'user_service.dart';
 
@@ -20,6 +22,17 @@ class AuthService {
 
   /// Returns null if the person closed the Google picker.
   Future<UserCredential?> signInWithGoogle() async {
+    if (kIsWeb) {
+      // The browser's own Google sign-in window.
+      try {
+        final result = await _auth.signInWithPopup(GoogleAuthProvider()..setCustomParameters({'prompt': 'select_account'}));
+        if (result.user != null) await _saveProfile(result.user!);
+        return result;
+      } on FirebaseAuthException catch (e) {
+        if (e.code == 'popup-closed-by-user' || e.code == 'cancelled-popup-request') return null;
+        rethrow;
+      }
+    }
     final account = await _google.signIn();
     if (account == null) return null;
     final auth = await account.authentication;
@@ -59,8 +72,10 @@ class AuthService {
     if (uid != null) {
       await UserService.instance.setOnline(uid, false);
       await NotificationService.instance.forgetDevice();
+      // A browser may be shared, so it forgets the encryption key too. The phone keeps it.
+      if (kIsWeb) await E2E.instance.forget(uid);
     }
-    await _google.signOut();
+    if (!kIsWeb) await _google.signOut();
     await _auth.signOut();
   }
 }

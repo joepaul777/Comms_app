@@ -83,6 +83,14 @@ globalThis.fetch = async (input, init = {}) => {
     sentFcm.push(JSON.parse(init.body).message);
     return new Response('{}');
   }
+  // Fake tmpfiles: one live file (by page link and by signed link) and one expired.
+  if (url === 'https://tmpfiles.org/abc/comms.bin') {
+    return new Response('<a href="https://tmpfiles.org/dl/1795092792.bd5f8a33/abc/comms.bin">Download</a>', { headers: { 'content-type': 'text/html' } });
+  }
+  if (url === 'https://tmpfiles.org/dl/1795092792.bd5f8a33/abc/comms.bin') {
+    return new Response(new Uint8Array([1, 2, 3, 4]), { headers: { 'content-type': 'application/octet-stream', 'content-length': '4' } });
+  }
+  if (url === 'https://tmpfiles.org/gone/comms.bin') return new Response('not found', { status: 404 });
   if (url.startsWith('https://example.metered.live/')) {
     return new Response(JSON.stringify([{ urls: 'turn:relay.example:80', username: 'u', credential: 'c' }]));
   }
@@ -97,7 +105,9 @@ const call = async (path, { token, body, method = 'POST', envOverride = {}, head
     headers: { ...(token ? { Authorization: `Bearer ${token}` } : {}), ...headers },
     body: method === 'POST' ? JSON.stringify(body || {}) : undefined,
   }), { ...env, ...envOverride });
-  return { status: res.status, body: await res.json() };
+  const type = res.headers.get('content-type') || '';
+  const parsed = type.includes('json') ? await res.json() : res.status === 204 || !res.body ? null : new Uint8Array(await res.arrayBuffer());
+  return { status: res.status, headers: res.headers, body: parsed };
 };
 
 const results = [];
@@ -182,6 +192,41 @@ await test('broadcast reaches everyone with a device token', async () => {
   assert.equal(r.body.sent, 3); // Alice and Bob (old style) and Carol (private document)
   assert.deepEqual(sentFcm.map(m => m.token).sort(), ['tok-alice', 'tok-bob', 'tok-carol']);
   assert.ok(sentFcm.every(m => m.notification.title === 'Comms 2.0'));
+});
+const mediaLink = u => '/media?u=' + encodeURIComponent(u);
+await test('media needs a signed-in user', async () => assert.equal((await call(mediaLink('https://tmpfiles.org/abc/comms.bin'), { method: 'GET' })).status, 401));
+await test('media comes through from a page link', async () => {
+  const r = await call(mediaLink('https://tmpfiles.org/abc/comms.bin'), { method: 'GET', token: alice });
+  assert.equal(r.status, 200);
+  assert.deepEqual([...r.body], [1, 2, 3, 4]);
+});
+await test('media comes through from an old /dl/ link', async () => {
+  const r = await call(mediaLink('https://tmpfiles.org/dl/abc/comms.bin'), { method: 'GET', token: alice });
+  assert.deepEqual([...r.body], [1, 2, 3, 4]);
+});
+await test('media comes through from a signed link', async () => {
+  const r = await call(mediaLink('https://tmpfiles.org/dl/1795092792.bd5f8a33/abc/comms.bin'), { method: 'GET', token: alice });
+  assert.deepEqual([...r.body], [1, 2, 3, 4]);
+});
+await test('expired media says so', async () => assert.equal((await call(mediaLink('https://tmpfiles.org/gone/comms.bin'), { method: 'GET', token: alice })).status, 410));
+await test('only tmpfiles links are fetched', async () => {
+  for (const u of ['https://evil.example/x', 'http://tmpfiles.org/abc/comms.bin', 'https://tmpfiles.org.evil.example/abc', 'https://tmpfiles.org:8443/abc', 'file:///etc/passwd', '']) {
+    assert.equal((await call(mediaLink(u), { method: 'GET', token: alice })).status, 400, u);
+  }
+});
+await test('the Comms web page may call the worker', async () => {
+  const pre = await call('/ice', { method: 'OPTIONS', headers: { Origin: 'https://jp-comms.web.app' } });
+  assert.equal(pre.status, 204);
+  assert.equal(pre.headers.get('access-control-allow-origin'), 'https://jp-comms.web.app');
+  assert.match(pre.headers.get('access-control-allow-headers'), /Authorization/);
+  const r = await call('/ice', { method: 'GET', token: alice, headers: { Origin: 'https://jp-comms.web.app' } });
+  assert.equal(r.headers.get('access-control-allow-origin'), 'https://jp-comms.web.app');
+});
+await test('other web pages may not', async () => {
+  const pre = await call('/ice', { method: 'OPTIONS', headers: { Origin: 'https://evil.example' } });
+  assert.equal(pre.status, 403);
+  const r = await call('/ice', { method: 'GET', token: alice, headers: { Origin: 'https://evil.example' } });
+  assert.equal(r.headers.get('access-control-allow-origin'), null);
 });
 await test('the service account token is reused, not re-signed every time', async () => assert.equal(oauthCalls, 1));
 

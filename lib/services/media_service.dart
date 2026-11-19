@@ -1,11 +1,11 @@
 import 'dart:async';
-import 'dart:io';
 import 'package:dio/dio.dart';
 import 'package:flutter/foundation.dart';
-import 'package:path_provider/path_provider.dart';
 import '../config.dart';
 import '../models/message_model.dart';
 import 'e2e_service.dart';
+import 'push_api.dart';
+import '../platform/platform.dart';
 
 class MediaTooLargeException implements Exception {
   @override
@@ -44,7 +44,7 @@ class MediaService {
   }
 
   static Future<Directory> mediaDirectory() async {
-    final docs = await getApplicationDocumentsDirectory();
+    final docs = await documentsDirectory();
     final dir = Directory('${docs.path}/media');
     if (!await dir.exists()) await dir.create(recursive: true);
     return dir;
@@ -93,7 +93,9 @@ class MediaService {
   Future<String> upload(File file, String fileName, {void Function(double)? onProgress, CancelToken? cancel}) async {
     final size = await file.length();
     if (size > AppConfig.maxUploadBytes) throw MediaTooLargeException();
-    final form = FormData.fromMap({'file': await MultipartFile.fromFile(file.path, filename: fileName)});
+    final form = FormData.fromMap({
+      'file': kIsWeb ? MultipartFile.fromBytes(await file.readAsBytes(), filename: fileName) : await MultipartFile.fromFile(file.path, filename: fileName),
+    });
     final res = await _dio.post(
       'https://tmpfiles.org/api/v1/upload',
       data: form,
@@ -167,10 +169,37 @@ class MediaService {
     });
   }
 
+  /// tmpfiles.org doesn't let web pages download its files, so the browser version
+  /// fetches them through the Comms server. It only ever sees the locked bytes.
+  Future<bool> _fetchInBrowser(String url, File partial, void Function(double)? onProgress) async {
+    final res = await _dio.get<List<int>>(
+      '${AppConfig.pushServer}/media',
+      queryParameters: {'u': url},
+      options: Options(
+        headers: await PushApi.authHeaders(),
+        responseType: ResponseType.bytes,
+        validateStatus: (s) => s == 200 || s == 404 || s == 410,
+      ),
+      onReceiveProgress: (got, total) {
+        if (total > 0) onProgress?.call(got / total);
+      },
+    );
+    if (res.statusCode != 200 || res.data == null) return false; // expired
+    await partial.writeAsBytes(res.data!);
+    return true;
+  }
+
   /// Downloads [url] to [target], unlocking it with [key] when the file is encrypted.
   Future<File?> fetchTo(String url, File target, {void Function(double)? onProgress, List<int>? key}) async {
     final partial = File('${target.path}.part');
     try {
+      if (kIsWeb) {
+        if (!await _fetchInBrowser(url, partial, onProgress)) return null;
+        if (key == null) return await partial.rename(target.path);
+        await E2E.decryptFile(partial, target, key);
+        await partial.delete();
+        return target;
+      }
       final link = await resolveLink(url);
       if (link == null) return null;
       final res = await _dio.download(

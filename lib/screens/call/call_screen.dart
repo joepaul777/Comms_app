@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
@@ -306,8 +307,9 @@ class _CallScreenState extends State<CallScreen> with TickerProviderStateMixin {
               label: 'Camera',
               onTap: ended ? null : _calls.toggleCamera,
             ),
-            _Toggle(icon: Icons.cameraswitch_rounded, active: false, label: 'Flip', onTap: ended ? null : _calls.switchCamera),
-          ] else
+            // A computer usually has one camera.
+            if (!kIsWeb) _Toggle(icon: Icons.cameraswitch_rounded, active: false, label: 'Flip', onTap: ended ? null : _calls.switchCamera),
+          ] else if (!kIsWeb)
             _Toggle(
               icon: _calls.speakerOn ? Icons.volume_up_rounded : Icons.hearing_rounded,
               active: _calls.speakerOn,

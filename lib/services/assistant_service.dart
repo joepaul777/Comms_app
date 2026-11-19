@@ -1,13 +1,12 @@
 import 'dart:async';
 import 'dart:convert';
-import 'dart:io';
 import 'dart:math';
 import 'package:flutter/services.dart';
-import 'package:path_provider/path_provider.dart';
 import '../models/user_model.dart';
 import 'chat_service.dart';
 import 'user_service.dart';
 import 'local_prefs.dart';
+import '../platform/platform.dart';
 
 /// "Send this text to this person", asked for by the JACE assistant.
 class AssistantRequest {
@@ -100,7 +99,7 @@ class AssistantService {
     } catch (_) {}
   }
 
-  Future<File> _file() async => File('${(await getApplicationSupportDirectory()).path}/assistant_names.json');
+  Future<File> _file() async => File('${(await supportDirectory()).path}/assistant_names.json');
 
   Future<Map<String, String>> _learned() async {
     try {

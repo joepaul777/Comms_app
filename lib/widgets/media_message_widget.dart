@@ -1,4 +1,3 @@
-import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:video_player/video_player.dart';
 import '../models/message_model.dart';
@@ -6,6 +5,7 @@ import '../services/media_service.dart';
 import '../theme/app_colors.dart';
 import '../theme/app_theme.dart';
 import 'full_screen_image_viewer.dart';
+import '../platform/platform.dart';
 
 /// Where a message's media is up to on this phone.
 class MediaState {
@@ -168,18 +168,17 @@ class ImageMessage extends StatelessWidget {
           onTap: () => Navigator.of(context).push(PageRouteBuilder(
             opaque: false,
             barrierColor: Colors.black,
-            pageBuilder: (_, _, _) => FullScreenImageViewer(imageProvider: FileImage(file), heroTag: 'img-${message.id}'),
+            pageBuilder: (_, _, _) => FullScreenImageViewer(imageProvider: localImage(file), heroTag: 'img-${message.id}'),
             transitionsBuilder: (_, a, _, child) => FadeTransition(opacity: a, child: child),
           )),
           child: Hero(
             tag: 'img-${message.id}',
             child: ConstrainedBox(
               constraints: const BoxConstraints(maxHeight: 360, minHeight: 120),
-              child: Image.file(
-                file,
+              child: Image(
+                image: localImage(file, cacheWidth: 900),
                 fit: BoxFit.cover,
                 width: double.infinity,
-                cacheWidth: 900,
                 // Fade the photo in once it has been decoded.
                 frameBuilder: (_, child, frame, sync) => sync
                     ? child
@@ -244,7 +243,7 @@ class _VideoThumbnailState extends State<_VideoThumbnail> {
   @override
   void initState() {
     super.initState();
-    final controller = VideoPlayerController.file(widget.file);
+    final controller = localVideo(widget.file);
     controller.initialize().then((_) {
       if (mounted) setState(() => _controller = controller);
     }).catchError((_) {});
@@ -277,7 +276,7 @@ class VideoViewer extends StatefulWidget {
 }
 
 class _VideoViewerState extends State<VideoViewer> {
-  late final VideoPlayerController _controller = VideoPlayerController.file(widget.file);
+  late final VideoPlayerController _controller = localVideo(widget.file);
 
   @override
   void initState() {

@@ -1,12 +1,14 @@
 import 'dart:convert';
-import 'dart:io';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:image_cropper/image_cropper.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:package_info_plus/package_info_plus.dart';
+import 'package:url_launcher/url_launcher.dart';
 import '../../models/user_model.dart';
 import '../../services/app_lock.dart';
 import '../../services/auth_service.dart';
+import '../../services/notification_service.dart';
 import '../../services/update_service.dart';
 import '../../services/user_service.dart';
 import '../../theme/app_colors.dart';
@@ -15,6 +17,7 @@ import '../../widgets/avatar.dart';
 import '../../widgets/ui.dart';
 import '../chat/offline_lobby_screen.dart';
 import '../update/update_sheet.dart';
+import '../../platform/platform.dart';
 
 class ProfileScreen extends StatefulWidget {
   final UserModel me;
@@ -39,11 +42,37 @@ class _ProfileScreenState extends State<ProfileScreen> {
     UpdateService.newerRelease().then((r) {
       if (mounted && r != null) setState(() => _updateWaiting = true);
     });
+    if (kIsWeb) {
+      NotificationService.instance.permitted().then((on) {
+        if (mounted) setState(() => _notifications = on);
+      });
+    }
+  }
+
+  bool _notifications = false;
+
+  Future<void> _askForNotifications() async {
+    final on = await NotificationService.instance.askPermission();
+    if (!mounted) return;
+    setState(() => _notifications = on);
+    if (!on) showSnack(context, 'Notifications are blocked. Allow them from the icon next to the address bar.', error: true);
   }
 
   Future<void> _changePhoto() async {
-    final picked = await ImagePicker().pickImage(source: ImageSource.gallery);
+    // The browser has no cropper; the photo is just made small (the app shows it round).
+    final picked = await ImagePicker().pickImage(
+      source: ImageSource.gallery,
+      maxWidth: kIsWeb ? 384 : null,
+      maxHeight: kIsWeb ? 384 : null,
+      imageQuality: kIsWeb ? 70 : null,
+    );
     if (picked == null) return;
+    if (kIsWeb) {
+      final bytes = await picked.readAsBytes();
+      await UserService.instance.updateProfile(widget.me.uid, photoUrl: 'data:${picked.mimeType ?? 'image/jpeg'};base64,${base64Encode(bytes)}');
+      if (mounted) showSnack(context, 'Photo updated');
+      return;
+    }
     final cropped = await ImageCropper().cropImage(
       sourcePath: picked.path,
       aspectRatio: const CropAspectRatio(ratioX: 1, ratioY: 1),
@@ -115,7 +144,9 @@ class _ProfileScreenState extends State<ProfileScreen> {
       context: context,
       builder: (d) => AlertDialog(
         title: const Text('Sign out?'),
-        content: const Text('You will stop getting messages and calls on this phone until you sign in again.'),
+        content: Text(kIsWeb
+            ? 'This browser will forget your account and its encryption key. Your phone keeps working.'
+            : 'You will stop getting messages and calls on this phone until you sign in again.'),
         actions: [
           TextButton(onPressed: () => Navigator.pop(d, false), child: const Text('Cancel', style: TextStyle(color: AppColors.textMuted))),
           TextButton(onPressed: () => Navigator.pop(d, true), child: const Text('Sign out', style: TextStyle(color: AppColors.error))),
@@ -167,6 +198,16 @@ class _ProfileScreenState extends State<ProfileScreen> {
                         Text(me.name, style: AppTheme.display(26), textAlign: TextAlign.center),
                         Text(me.email, style: AppTheme.body(14, color: AppColors.textMuted)),
                         const SizedBox(height: 24),
+                        if (kIsWeb)
+                          _Group(children: [
+                            _Row(
+                              icon: Icons.android_rounded,
+                              title: 'Get Comms for Android',
+                              value: 'Free',
+                              onTap: () => launchUrl(Uri.parse('https://joepaul.vercel.app/downloads/Comms.apk')),
+                            ),
+                          ])
+                        else
                         _Group(children: [
                           _Row(
                             icon: Icons.system_update_rounded,
@@ -191,6 +232,15 @@ class _ProfileScreenState extends State<ProfileScreen> {
                         ]),
                         const SizedBox(height: 14),
                         _Group(children: [
+                          if (kIsWeb)
+                            _Row(
+                              icon: Icons.notifications_active_rounded,
+                              title: 'Notifications',
+                              value: _notifications ? 'On while Comms is open' : 'Off',
+                              trailing: Switch(value: _notifications, onChanged: _notifications ? null : (_) => _askForNotifications()),
+                              onTap: _notifications ? null : _askForNotifications,
+                            )
+                          else
                           ListenableBuilder(
                             listenable: AppLock.instance,
                             builder: (context, _) => _Row(
@@ -208,7 +258,8 @@ class _ProfileScreenState extends State<ProfileScreen> {
                             trailing: SizedBox.shrink(),
                           ),
                         ]),
-                        const SizedBox(height: 14),
+                        if (!kIsWeb) const SizedBox(height: 14),
+                        if (!kIsWeb)
                         _Group(children: [
                           _Row(
                             icon: Icons.wifi_tethering_rounded,
@@ -222,7 +273,10 @@ class _ProfileScreenState extends State<ProfileScreen> {
                           _Row(icon: Icons.logout_rounded, title: 'Sign out', danger: true, onTap: _signOut),
                         ]),
                         const SizedBox(height: 24),
-                        Text('Photos, videos and voice notes are kept on your phone.\nThe online copy is deleted after an hour.',
+                        Text(
+                            kIsWeb
+                                ? 'Photos, videos and voice notes are kept in this browser.\nThe online copy is deleted after an hour.'
+                                : 'Photos, videos and voice notes are kept on your phone.\nThe online copy is deleted after an hour.',
                             textAlign: TextAlign.center, style: AppTheme.body(12.5, color: AppColors.textFaint, height: 1.5)),
                       ],
                     ),

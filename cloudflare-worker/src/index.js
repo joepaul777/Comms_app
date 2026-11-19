@@ -16,8 +16,35 @@ import { decodeDocument, verifyIdToken, serviceAccountToken } from './google.js'
 const json = (body, status = 200) =>
   new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
 
+// Comms in a browser lives here; only these pages may call the worker from a browser.
+const WEB_ORIGINS = ['https://jp-comms.web.app', 'https://jp-comms.firebaseapp.com'];
+const LOCAL_ORIGIN = /^http:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/;
+
+function corsHeaders(request) {
+  const origin = request.headers.get('Origin') || '';
+  if (!WEB_ORIGINS.includes(origin) && !LOCAL_ORIGIN.test(origin)) return null;
+  return {
+    'Access-Control-Allow-Origin': origin,
+    'Access-Control-Allow-Headers': 'Authorization, Content-Type',
+    'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+    'Access-Control-Max-Age': '86400',
+    Vary: 'Origin',
+  };
+}
+
 export default {
   async fetch(request, env) {
+    const cors = corsHeaders(request);
+    if (request.method === 'OPTIONS') return new Response(null, { status: cors ? 204 : 403, headers: cors || {} });
+    const res = await handle(request, env);
+    if (!cors) return res;
+    const out = new Response(res.body, res);
+    for (const [k, v] of Object.entries(cors)) out.headers.set(k, v);
+    return out;
+  },
+};
+
+async function handle(request, env) {
     const url = new URL(request.url);
     try {
       if (request.method === 'POST' && url.pathname === '/broadcast') return await broadcast(request, env);
@@ -27,6 +54,7 @@ export default {
       if (!uid) return json({ error: 'unauthorized' }, 401);
 
       if (request.method === 'GET' && url.pathname === '/ice') return await iceServers(env);
+      if (request.method === 'GET' && url.pathname === '/media') return await media(url.searchParams.get('u'));
       if (request.method !== 'POST') return json({ error: 'not found' }, 404);
 
       const body = await request.json().catch(() => ({}));
@@ -44,8 +72,45 @@ export default {
       console.error(error.stack || error);
       return json({ error: 'server error' }, 500);
     }
-  },
-};
+}
+
+// ---------------------------------------------------------------------------
+// Media for the browser version
+// ---------------------------------------------------------------------------
+
+// tmpfiles.org lets web pages upload but not download, so Comms in a browser fetches
+// photos, videos and voice notes through here. They are end-to-end encrypted, so
+// this only ever passes along scrambled bytes. Only tmpfiles links are fetched, and
+// only for signed-in Comms users, so this can't be used as an open proxy.
+const SIGNED_PATH = /^\/dl\/\d+\.[0-9a-f]+\//;
+
+async function media(raw) {
+  let target;
+  try {
+    target = new URL(raw || '');
+  } catch {
+    return json({ error: 'bad link' }, 400);
+  }
+  if (target.protocol !== 'https:' || target.hostname !== 'tmpfiles.org' || target.port) return json({ error: 'bad link' }, 400);
+  if (!SIGNED_PATH.test(target.pathname)) {
+    // A page link (or an old /dl/ link): the file's own link is on its page.
+    const parts = target.pathname.split('/').filter(Boolean);
+    if (parts[0] === 'dl') parts.shift();
+    const page = await fetch(`https://tmpfiles.org/${parts.join('/')}`);
+    if (page.status !== 200) return json({ error: 'gone' }, 410);
+    const found = (await page.text()).match(/href="(https:\/\/tmpfiles\.org\/dl\/[^"]+)"/);
+    if (!found) return json({ error: 'gone' }, 410);
+    target = new URL(found[1].replace(/&amp;/g, '&'));
+    if (target.hostname !== 'tmpfiles.org' || !SIGNED_PATH.test(target.pathname)) return json({ error: 'gone' }, 410);
+  }
+  const file = await fetch(target.toString());
+  // An expired link answers with a web page instead of the file.
+  if (file.status !== 200 || (file.headers.get('content-type') || '').includes('text/html')) return json({ error: 'gone' }, 410);
+  const headers = { 'Content-Type': 'application/octet-stream', 'Cache-Control': 'private, max-age=3600' };
+  const length = file.headers.get('content-length');
+  if (length) headers['Content-Length'] = length;
+  return new Response(file.body, { status: 200, headers });
+}
 
 async function authenticate(request, env) {
   const header = request.headers.get('Authorization') || '';

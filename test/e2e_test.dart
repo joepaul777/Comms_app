@@ -101,6 +101,34 @@ void main() {
     }
   });
 
+  test('a linked browser gets exactly the account key, and nobody else can', () async {
+    await asPhone('alice', 1);
+    final (pair, oneOff) = await E2E.oneOffKeyPair();
+    final aad = 'link:alice:$oneOff';
+    final box = await E2E.instance.lockKeyFor(oneOff, aad: aad);
+    expect(box, isNot(contains(oneOff)));
+
+    final seed = await E2E.unlockHandedKey(pair, oneOff, alice, box, aad: aad);
+    expect(await E2E.publicKeyOf(seed), alice);
+
+    // Someone else's one-off key can't open it.
+    final (other, otherKey) = await E2E.oneOffKeyPair();
+    await expectLater(E2E.unlockHandedKey(other, otherKey, alice, box, aad: aad), throwsA(anything));
+    // Nor can it be replayed for another request or account.
+    await expectLater(E2E.unlockHandedKey(pair, oneOff, alice, box, aad: 'link:bob:$oneOff'), throwsA(anything));
+    // A server that lies about whose key is on the profile is caught.
+    await expectLater(E2E.unlockHandedKey(pair, oneOff, bob, box, aad: aad), throwsA(anything));
+  });
+
+  test('both screens show the same six-digit link code', () async {
+    final (_, oneOff) = await E2E.oneOffKeyPair();
+    final code = await E2E.linkCode(oneOff);
+    expect(code, matches(RegExp(r'^\d{3} \d{3}$')));
+    expect(await E2E.linkCode(oneOff), code);
+    final (_, another) = await E2E.oneOffKeyPair();
+    expect(await E2E.linkCode(another), isNot(code));
+  });
+
   test('both people see the same security code, and it changes with a new key', () async {
     final ab = await E2E.securityCode(alice, bob);
     expect(await E2E.securityCode(bob, alice), ab);

@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import '../models/message_model.dart';
 import '../theme/app_colors.dart';
 import '../theme/app_theme.dart';
+import '../platform/platform.dart';
 import 'media_message_widget.dart';
 import 'ui.dart';
 
@@ -59,7 +60,7 @@ class _AudioMessageState extends State<AudioMessage> {
     if (_position > Duration.zero) {
       await _player.resume();
     } else {
-      await _player.play(DeviceFileSource(path));
+      await _player.play(localAudio(File(path)));
     }
   }
 

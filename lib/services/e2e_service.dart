@@ -1,11 +1,11 @@
 import 'dart:async';
 import 'dart:convert';
-import 'dart:io';
 import 'dart:math';
 import 'dart:typed_data';
 import 'package:cryptography/cryptography.dart';
 import 'package:cryptography/dart.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
+import '../platform/platform.dart';
 
 /// A message's words could not be locked for someone, because their phone has no
 /// encryption key yet (they are on an old version of Comms).
@@ -98,6 +98,86 @@ class E2E {
   Future<void> _use(List<int> seed) async {
     _pair = await _x25519.newKeyPairFromSeed(seed);
     _publicKey = base64Encode((await _pair!.extractPublicKey()).bytes);
+  }
+
+  /// The public key that goes with [seed].
+  static Future<String> publicKeyOf(List<int> seed) async =>
+      base64Encode((await (await _x25519.newKeyPairFromSeed(seed)).extractPublicKey()).bytes);
+
+  /// Keeps a key handed over by the person's other device (see DeviceLink), in place
+  /// of this device's own.
+  Future<void> adoptSeed(String uid, List<int> seed) async {
+    if (seed.length != 32) throw const FormatException('bad key');
+    await _storage.write(key: _storageKey(uid), value: base64Encode(seed));
+    final saved = await _readSeed(uid);
+    if (saved == null) throw StateError('Could not save the encryption key');
+    _uid = uid;
+    _wrapKeys.clear();
+    _opened.clear();
+    createdNow = false;
+    await (_loading = _use(seed));
+  }
+
+  /// Forgets this device's key for [uid] (signing out of a browser).
+  Future<void> forget(String uid) async {
+    await _storage.delete(key: _storageKey(uid));
+    if (_uid == uid) {
+      _uid = null;
+      _pair = null;
+      _publicKey = null;
+      _loading = null;
+      _wrapKeys.clear();
+      _opened.clear();
+    }
+  }
+
+  // ---- Handing the key to another of the person's devices ---------------------
+
+  /// A key only the holder of [keyPair] and the owner of [theirKey] can work out,
+  /// used once to hand over the account's key.
+  static Future<SecretKey> _linkKey(KeyPair keyPair, String myKey, String theirKey) async {
+    final theirs = base64Decode(theirKey);
+    if (theirs.length != 32) throw const FormatException('bad public key');
+    final shared = await _x25519.sharedSecretKey(keyPair: keyPair, remotePublicKey: SimplePublicKey(theirs, type: KeyPairType.x25519));
+    final pair = [base64Decode(myKey), theirs]..sort(_compareBytes);
+    return _hkdf.deriveKey(secretKey: shared, nonce: [...pair[0], ...pair[1]], info: utf8.encode('comms-link-v1'));
+  }
+
+  /// Locks this device's key for the new device whose one-off public key is [theirKey].
+  Future<String> lockKeyFor(String theirKey, {required String aad}) async {
+    if (!await ready()) throw StateError('No key on this device');
+    final seed = await _pair!.extractPrivateKeyBytes();
+    final nonce = randomBytes(12);
+    final box = await _gcm.encrypt(seed, secretKey: await _linkKey(_pair!, _publicKey!, theirKey), nonce: nonce, aad: utf8.encode(aad));
+    return base64Encode([...nonce, ...box.cipherText, ...box.mac.bytes]);
+  }
+
+  /// A one-off key pair for asking another device for the account's key.
+  static Future<(SimpleKeyPair, String)> oneOffKeyPair() async {
+    final pair = await _x25519.newKeyPairFromSeed(randomBytes(32));
+    return (pair, base64Encode((await pair.extractPublicKey()).bytes));
+  }
+
+  /// Unlocks a key locked by [lockKeyFor]. [accountKey] is the public key on the
+  /// profile; the result must match it.
+  static Future<List<int>> unlockHandedKey(SimpleKeyPair oneOff, String oneOffKey, String accountKey, String box, {required String aad}) async {
+    final bytes = base64Decode(box);
+    final seed = await _gcm.decrypt(
+      SecretBox(bytes.sublist(12, bytes.length - 16), nonce: bytes.sublist(0, 12), mac: Mac(bytes.sublist(bytes.length - 16))),
+      secretKey: await _linkKey(oneOff, oneOffKey, accountKey),
+      aad: utf8.encode(aad),
+    );
+    if (await publicKeyOf(seed) != accountKey) throw const FormatException('key does not match the profile');
+    return seed;
+  }
+
+  /// Six digits both screens show, so the person can check they are linking the
+  /// device in front of them.
+  static Future<String> linkCode(String oneOffKey) async {
+    final hash = (await const DartSha256().hash([...utf8.encode('comms-link-code-v1'), ...base64Decode(oneOffKey)])).bytes;
+    final n = ((hash[0] << 24) | (hash[1] << 16) | (hash[2] << 8) | hash[3]) % 1000000;
+    final digits = n.toString().padLeft(6, '0');
+    return '${digits.substring(0, 3)} ${digits.substring(3)}';
   }
 
   /// Uses a fixed key (tests only).

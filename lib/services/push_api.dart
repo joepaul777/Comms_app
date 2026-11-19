@@ -14,9 +14,14 @@ class PushApi {
   ));
 
   static Future<Options?> _auth() async {
+    final headers = await authHeaders();
+    return headers == null ? null : Options(headers: headers);
+  }
+
+  /// Proves to the worker who is asking.
+  static Future<Map<String, String>?> authHeaders() async {
     final token = await FirebaseAuth.instance.currentUser?.getIdToken();
-    if (token == null) return null;
-    return Options(headers: {'Authorization': 'Bearer $token'});
+    return token == null ? null : {'Authorization': 'Bearer $token'};
   }
 
   static Future<void> _post(String path, Map<String, dynamic> body) async {

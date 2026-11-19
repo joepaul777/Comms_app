@@ -23,6 +23,8 @@ class UpdateService {
 
   /// The newer release, or null if this phone is up to date (or the check failed).
   static Future<ReleaseInfo?> newerRelease() async {
+    // The web version is always the newest; there is nothing to install.
+    if (kIsWeb) return null;
     final data = await PushApi.latestRelease();
     if (data == null) return null;
     final latest = ReleaseInfo(

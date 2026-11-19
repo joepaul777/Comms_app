@@ -2,7 +2,6 @@ import 'dart:async';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
-import 'package:flutter_ringtone_player/flutter_ringtone_player.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:uuid/uuid.dart';
@@ -10,6 +9,7 @@ import 'package:wakelock_plus/wakelock_plus.dart';
 import '../config.dart';
 import '../models/call_model.dart';
 import '../models/user_model.dart';
+import '../platform/platform.dart';
 import 'notification_service.dart';
 import 'push_api.dart';
 import 'rate_limiter.dart';
@@ -210,6 +210,7 @@ class CallService extends ChangeNotifier {
     phase = CallPhase.incoming;
     notifyListeners();
     _startRinging();
+    unawaited(NotificationService.instance.showRinging(incoming));
     _startBusyHeartbeat();
     _watchCall(incoming.id);
     _ringTimer = Timer(AppConfig.ringTimeout + const Duration(seconds: 3), () {
@@ -371,6 +372,8 @@ class CallService extends ChangeNotifier {
   // ---------------------------------------------------------------------------
 
   Future<bool> _permissions(bool video) async {
+    // The browser asks for the microphone and camera itself when the call starts.
+    if (kIsWeb) return true;
     final statuses = await [Permission.microphone, if (video) Permission.camera].request();
     return statuses.values.every((s) => s.isGranted);
   }
@@ -393,8 +396,8 @@ class CallService extends ChangeNotifier {
     };
     _pc!.onIceConnectionState = _onIceState;
     speakerOn = video;
-    await Helper.setSpeakerphoneOn(speakerOn);
-    await WakelockPlus.enable();
+    await _setSpeaker(speakerOn);
+    await WakelockPlus.enable().catchError((_) {});
     notifyListeners();
   }
 
@@ -473,7 +476,7 @@ class CallService extends ChangeNotifier {
 
   Future<void> toggleSpeaker() async {
     speakerOn = !speakerOn;
-    await Helper.setSpeakerphoneOn(speakerOn);
+    await _setSpeaker(speakerOn);
     notifyListeners();
   }
 
@@ -487,7 +490,10 @@ class CallService extends ChangeNotifier {
 
   Future<void> switchCamera() async {
     final track = localStream?.getVideoTracks().firstOrNull;
-    if (track != null) await Helper.switchCamera(track);
+    if (track == null) return;
+    try {
+      await Helper.switchCamera(track);
+    } catch (_) {}
   }
 
   // ---------------------------------------------------------------------------
@@ -559,10 +565,8 @@ class CallService extends ChangeNotifier {
     await _pc?.close();
     _pc = null;
     if (myUid.isNotEmpty) unawaited(UserService.instance.setBusy(myUid, false));
-    try {
-      await Helper.setSpeakerphoneOn(false);
-    } catch (_) {}
-    await WakelockPlus.disable();
+    await _setSpeaker(false);
+    await WakelockPlus.disable().catchError((_) {});
   }
 
   void _resetState() {
@@ -585,15 +589,23 @@ class CallService extends ChangeNotifier {
     });
   }
 
+  /// Phones switch between earpiece and loudspeaker; a computer just has its speakers.
+  Future<void> _setSpeaker(bool on) async {
+    if (kIsWeb) return;
+    try {
+      await Helper.setSpeakerphoneOn(on);
+    } catch (_) {}
+  }
+
   void _startRinging() {
     _ringing = true;
-    FlutterRingtonePlayer().playRingtone(looping: true, asAlarm: false);
+    startRingtone();
   }
 
   void _stopRinging() {
     if (!_ringing) return;
     _ringing = false;
-    FlutterRingtonePlayer().stop();
+    stopRingtone();
   }
 
   /// Data URLs are too large to copy into every call record.

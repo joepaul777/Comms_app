@@ -1,8 +1,8 @@
 import 'dart:async';
-import 'dart:io';
+import 'package:cross_file/cross_file.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:path_provider/path_provider.dart';
 import 'package:record/record.dart';
 import '../config.dart';
 import '../models/message_model.dart';
@@ -10,6 +10,7 @@ import '../theme/app_colors.dart';
 import '../theme/app_theme.dart';
 import 'ui.dart';
 import '../services/local_prefs.dart';
+import '../platform/platform.dart';
 
 /// The bar at the bottom of a chat: text, attachments and voice messages.
 class Composer extends StatefulWidget {
@@ -146,10 +147,11 @@ class _ComposerState extends State<Composer> with SingleTickerProviderStateMixin
       if (mounted) showSnack(context, 'Allow the microphone to send voice messages', error: true);
       return;
     }
-    final dir = await getTemporaryDirectory();
+    final dir = await temporaryDirectory();
     final path = '${dir.path}/voice-${DateTime.now().millisecondsSinceEpoch}.m4a';
     await _recorder.start(
-      const RecordConfig(encoder: AudioEncoder.aacLc, bitRate: 64000, sampleRate: 44100, numChannels: 1),
+      // Browsers can't record AAC; Opus is what they do well.
+      RecordConfig(encoder: kIsWeb ? AudioEncoder.opus : AudioEncoder.aacLc, bitRate: 64000, sampleRate: kIsWeb ? 48000 : 44100, numChannels: 1),
       path: path,
     );
     HapticFeedback.mediumImpact();
@@ -183,7 +185,8 @@ class _ComposerState extends State<Composer> with SingleTickerProviderStateMixin
       _levels.fillRange(0, _levels.length, 0.08);
     });
     if (path == null) return;
-    final file = File(path);
+    // In a browser the recording comes back as a link to its bytes.
+    final file = await fileFromPicked(XFile(path, name: kIsWeb ? 'voice.webm' : null));
     if (!send || length < const Duration(milliseconds: 800)) {
       if (send && mounted) showSnack(context, 'Hold on a little longer to record', error: true);
       if (await file.exists()) await file.delete();

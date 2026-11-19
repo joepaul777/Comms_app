@@ -1,4 +1,3 @@
-import 'dart:io';
 import 'dart:math' as math;
 import 'dart:ui' show ImageFilter;
 import 'package:flutter/material.dart';
@@ -12,6 +11,7 @@ import 'audio_message_widget.dart';
 import 'media_message_widget.dart';
 import 'view_once_message.dart';
 import '../services/local_prefs.dart';
+import '../platform/platform.dart';
 
 /// The six quick reactions, plus more behind the + button.
 const quickReactions = ['👍', '❤️', '😂', '😮', '😢', '🙏'];
