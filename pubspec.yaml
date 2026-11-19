@@ -1,7 +1,7 @@
 name: comms
 description: "Comms - Stay connected with your people"
 publish_to: 'none'
-version: 2.2.0+3006
+version: 2.2.1+3007
 
 environment:
   sdk: ^3.12.2
