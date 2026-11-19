@@ -64,6 +64,18 @@ class _ComposerState extends State<Composer> with SingleTickerProviderStateMixin
   void initState() {
     super.initState();
     _text.addListener(_onTextChanged);
+    // On a computer, Enter sends and Shift+Enter starts a new line.
+    if (kIsWeb) _focus.onKeyEvent = _onKey;
+  }
+
+  KeyEventResult _onKey(FocusNode node, KeyEvent event) {
+    final enter = event.logicalKey == LogicalKeyboardKey.enter || event.logicalKey == LogicalKeyboardKey.numpadEnter;
+    if (!enter || event is KeyUpEvent) return KeyEventResult.ignored;
+    if (HardwareKeyboard.instance.isShiftPressed) return KeyEventResult.ignored;
+    // Leave Enter alone while a word is still being composed (some keyboards for other languages).
+    if (_text.value.composing.isValid) return KeyEventResult.ignored;
+    if (event is KeyDownEvent) _send();
+    return KeyEventResult.handled;
   }
 
   void _onTextChanged() {

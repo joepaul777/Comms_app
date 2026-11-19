@@ -363,11 +363,17 @@ class _MessageMenuState extends State<MessageMenu> {
     barTop = barTop.clamp(pad.top + 8, screen.height - pad.bottom - barHeight - 8);
     actionsTop = actionsTop.clamp(pad.top + 8, screen.height - pad.bottom - actionsHeight - 8);
 
+    // Line the reactions and actions up with the message itself (on a wide screen the
+    // chat sits to the right of the chat list), keeping room for the reaction bar.
     final side = widget.mine ? Alignment.centerRight : Alignment.centerLeft;
+    const room = 380.0;
+    final maxInset = math.max(12.0, screen.width - room);
+    final left = widget.mine ? 12.0 : rect.left.clamp(12.0, maxInset);
+    final right = widget.mine ? (screen.width - rect.right).clamp(12.0, maxInset) : 12.0;
     Widget placed(double top, Widget child) => Positioned(
           top: top,
-          left: 12,
-          right: 12,
+          left: left,
+          right: right,
           child: Align(alignment: side, child: child),
         );
 
