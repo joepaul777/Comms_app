@@ -5,6 +5,7 @@ import 'package:flutter/foundation.dart';
 import 'package:path_provider/path_provider.dart';
 import '../config.dart';
 import '../models/message_model.dart';
+import 'e2e_service.dart';
 
 class MediaTooLargeException implements Exception {
   @override
@@ -12,8 +13,9 @@ class MediaTooLargeException implements Exception {
 }
 
 /// Photos, videos and voice notes travel through tmpfiles.org, which deletes them
-/// after an hour. Every phone keeps its own copy in the app's private folder,
-/// named after the message, so nothing depends on the link afterwards.
+/// after an hour. They are encrypted on the sender's phone first, so tmpfiles (and
+/// anyone who finds the link) only ever sees scrambled bytes. Every phone keeps its
+/// own unlocked copy in the app's private folder, named after the message.
 class MediaService {
   MediaService._();
   static final MediaService instance = MediaService._();
@@ -59,10 +61,32 @@ class MediaService {
     return await file.exists() && await file.length() > 0 ? file : null;
   }
 
+  /// Removes this phone's copy of a message's media (used once a view-once photo is used up).
+  Future<void> deleteCopy(MessageModel message) async {
+    try {
+      final file = await localCopy(message);
+      if (file != null) await file.delete();
+    } catch (_) {}
+  }
+
   /// Keeps the sender's own copy before the upload starts.
   Future<File> keepCopy(File source, String messageId, String ext) async {
     final target = await fileFor(messageId, ext);
     return source.copy(target.path);
+  }
+
+  /// Encrypts [file] with [contentKey] and uploads the scrambled copy. Returns its link.
+  Future<String> uploadEncrypted(File file, List<int> contentKey, {void Function(double)? onProgress, CancelToken? cancel}) async {
+    final locked = File('${file.path}.locked');
+    try {
+      await E2E.encryptFile(file, locked, contentKey);
+      // A meaningless name: the real one travels inside the encrypted message.
+      return await upload(locked, 'comms.bin', onProgress: onProgress, cancel: cancel);
+    } finally {
+      try {
+        if (await locked.exists()) await locked.delete();
+      } catch (_) {}
+    }
   }
 
   /// Uploads to tmpfiles.org and returns the file's direct, signed download link.
@@ -135,7 +159,7 @@ class MediaService {
         final existing = await localCopy(message);
         if (existing != null) return existing;
         final ext = extensionOf(message.mediaName ?? '', message.type);
-        return await fetchTo(message.mediaUrl!, await fileFor(message.id, ext), onProgress: onProgress);
+        return await fetchTo(message.mediaUrl!, await fileFor(message.id, ext), onProgress: onProgress, key: message.contentKey);
       } finally {
         // Allow a retry later if this attempt failed.
         unawaited(Future.delayed(const Duration(seconds: 1), () => _downloads.remove(message.id)));
@@ -143,7 +167,8 @@ class MediaService {
     });
   }
 
-  Future<File?> fetchTo(String url, File target, {void Function(double)? onProgress}) async {
+  /// Downloads [url] to [target], unlocking it with [key] when the file is encrypted.
+  Future<File?> fetchTo(String url, File target, {void Function(double)? onProgress, List<int>? key}) async {
     final partial = File('${target.path}.part');
     try {
       final link = await resolveLink(url);
@@ -162,7 +187,11 @@ class MediaService {
         await partial.delete();
         return null;
       }
-      return await partial.rename(target.path);
+      if (key == null) return await partial.rename(target.path);
+      // Unlock into place; a file that was changed on the way fails here and is thrown away.
+      await E2E.decryptFile(partial, target, key);
+      await partial.delete();
+      return target;
     } catch (e) {
       debugPrint('media download failed: $e');
       if (await partial.exists()) await partial.delete();
@@ -171,12 +200,12 @@ class MediaService {
   }
 
   /// Used by the notification handler, which runs without the rest of the app.
-  static Future<void> prefetch({required String url, required String messageId, required String name, required String type}) async {
+  static Future<void> prefetch({required String url, required String messageId, required String name, required String type, List<int>? key}) async {
     if (url.isEmpty) return;
     final messageType = MessageType.values.firstWhere((t) => t.name == type, orElse: () => MessageType.image);
     final dir = await mediaDirectory();
     final target = File('${dir.path}/$messageId.${extensionOf(name, messageType)}');
     if (await target.exists()) return;
-    await MediaService.instance.fetchTo(url, target);
+    await MediaService.instance.fetchTo(url, target, key: key);
   }
 }

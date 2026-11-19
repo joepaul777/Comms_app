@@ -10,8 +10,13 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import '../models/call_model.dart';
+import '../models/chat_room_model.dart';
+import 'chat_service.dart';
+import 'user_service.dart';
+import 'e2e_service.dart';
 import 'media_service.dart';
 import 'push_api.dart';
+import 'local_prefs.dart';
 
 const _messageChannel = AndroidNotificationChannel(
   'comms_messages',
@@ -49,8 +54,18 @@ class NotificationTap {
 /// be passed to it. Only the app knows which chat is on screen.
 const _mainPortName = 'comms_main_isolate';
 
-int callNotificationId(String callId) => callId.hashCode & 0x7fffffff;
-int chatNotificationId(String roomId) => roomId.hashCode & 0x7fffffff;
+/// The same number for the same text in every part of the app (the background handler
+/// and the app itself), so a notification shown by one can be cleared by the other.
+int stableNotificationId(String key) {
+  var hash = 0x811c9dc5;
+  for (final unit in key.codeUnits) {
+    hash = ((hash ^ unit) * 0x01000193) & 0xffffffff;
+  }
+  return hash & 0x7fffffff;
+}
+
+int callNotificationId(String callId) => stableNotificationId('call:$callId');
+int chatNotificationId(String roomId) => stableNotificationId('chat:$roomId');
 
 final FlutterLocalNotificationsPlugin _plugin = FlutterLocalNotificationsPlugin();
 bool _pluginReady = false;
@@ -72,12 +87,84 @@ Future<void> _initPlugin({DidReceiveNotificationResponseCallback? onTap}) async 
   _pluginReady = true;
 }
 
+/// Unlocks an encrypted chat push on this phone: the server only ever sends scrambled
+/// text, so the words are put into the notification here. Returns the push with
+/// `body` filled in, plus `mediaUrl`, `mediaName` and the media key when there is one.
+Future<(Map<String, dynamic>, List<int>?)> _unlockChat(Map<String, dynamic> data) async {
+  final to = data['to'] as String? ?? '';
+  final wrapped = data['k'] as String? ?? '';
+  final locked = data['c'] as String? ?? '';
+  if (to.isEmpty || wrapped.isEmpty || locked.isEmpty) return (data, null);
+  try {
+    await E2E.instance.load(to);
+    final opened = await E2E.instance.open(
+      {'f': data['f'], 'n': data['n'], 'c': locked, 'k': {to: wrapped}},
+      aad: E2E.messageAad(data['id'] as String? ?? '', data['messageId'] as String? ?? ''),
+    );
+    if (opened == null) return (data, null);
+    final p = opened.payload;
+    final text = p['t'] as String? ?? '';
+    final isGroup = data['isGroup'] == 'true';
+    return (
+      {
+        ...data,
+        if (text.isNotEmpty) 'body': isGroup ? '${data['senderName'] ?? ''}: $text' : text,
+        if (text.isNotEmpty) 'msgText': text,
+        'mediaUrl': p['u'] ?? '',
+        'mediaName': p['m'] ?? '',
+      },
+      opened.contentKey,
+    );
+  } catch (e) {
+    debugPrint('could not unlock push: $e');
+    return (data, null);
+  }
+}
+
+/// One notification per chat, listing its newest unread messages, with a Reply box.
 Future<void> _showChat(Map<String, dynamic> data) async {
   final roomId = data['id'] as String? ?? '';
+  final senderId = data['senderId'] as String? ?? '';
+  final isGroup = data['isGroup'] == 'true';
+  await _ensureNicknames();
+  final serverName = data['senderName'] as String? ?? '';
+  final senderName = Nicknames.instance.name(senderId, serverName.isNotEmpty ? serverName : (isGroup ? 'Someone' : data['title'] as String? ?? 'Someone'));
+  final title = isGroup ? (data['title'] as String? ?? 'Group') : senderName;
+  var text = data['msgText'] as String? ?? data['body'] as String? ?? 'New message';
+  // Older pushes put "Name: " in front of group messages; the sender is shown separately here.
+  if (isGroup && data['msgText'] == null && text.startsWith('$serverName: ')) text = text.substring(serverName.length + 2);
+  await _postChat(
+    roomId,
+    title: title,
+    isGroup: isGroup,
+    message: Message(text, DateTime.now(), Person(name: senderName, key: senderId.isEmpty ? null : senderId)),
+    alert: true,
+  );
+}
+
+const _replyAction = AndroidNotificationAction(
+  'reply',
+  'Reply',
+  inputs: [AndroidNotificationActionInput(label: 'Message')],
+  showsUserInterface: false,
+  cancelNotification: false,
+  allowGeneratedReplies: true,
+);
+
+/// Adds [message] to the chat's notification (keeping the earlier unread ones) and shows it.
+Future<void> _postChat(String roomId, {required String title, required bool isGroup, required Message message, required bool alert}) async {
+  final id = chatNotificationId(roomId);
+  final android = _plugin.resolvePlatformSpecificImplementation<AndroidFlutterLocalNotificationsPlugin>();
+  var earlier = const <Message>[];
+  try {
+    earlier = (await android?.getActiveNotificationMessagingStyle(id))?.messages ?? const <Message>[];
+  } catch (_) {}
+  final all = [...earlier, message];
+  final recent = all.length > 8 ? all.sublist(all.length - 8) : all;
   await _plugin.show(
-    chatNotificationId(roomId),
-    data['title'] as String? ?? 'Comms',
-    data['body'] as String? ?? 'New message',
+    id,
+    title,
+    message.text,
     NotificationDetails(
       android: AndroidNotificationDetails(
         _messageChannel.id,
@@ -87,10 +174,59 @@ Future<void> _showChat(Map<String, dynamic> data) async {
         icon: '@mipmap/ic_launcher',
         color: const Color(0xFFFACC15),
         category: AndroidNotificationCategory.message,
+        // On a locked phone, only "Comms: new message" shows, never the words.
+        visibility: NotificationVisibility.private,
+        // Your own reply updates it quietly; new messages ring.
+        onlyAlertOnce: !alert,
+        styleInformation: MessagingStyleInformation(
+          const Person(name: 'You'),
+          conversationTitle: isGroup ? title : null,
+          groupConversation: isGroup,
+          messages: recent,
+        ),
+        actions: const [_replyAction],
       ),
       iOS: const DarwinNotificationDetails(),
     ),
     payload: 'chat|$roomId',
+  );
+}
+
+/// Sends what was typed into a notification's Reply box. Works with the app closed.
+Future<void> replyFromNotification(String roomId, String text) async {
+  final words = text.trim();
+  if (roomId.isEmpty || words.isEmpty) return;
+  final user = FirebaseAuth.instance.currentUser ?? await FirebaseAuth.instance.authStateChanges().first;
+  if (user == null) return;
+  String? problem;
+  ChatRoomModel? room;
+  try {
+    final snap = await FirebaseFirestore.instance.collection('chatRooms').doc(roomId).get();
+    if (!snap.exists) return;
+    room = ChatRoomModel.fromMap(snap.data()!);
+    final me = await UserService.instance.getUser(user.uid, fresh: true);
+    if (me == null) return;
+    await E2E.instance.load(user.uid);
+    await ChatService.instance.sendMessage(room: room, sender: me, text: words);
+    // Replying means you've read the chat.
+    await ChatService.instance.markSeen(roomId, user.uid, DateTime.now().millisecondsSinceEpoch);
+  } on NoKeyException {
+    problem = 'Not sent: they need to update Comms';
+  } catch (e) {
+    debugPrint('notification reply failed: $e');
+    problem = 'Not sent. Open Comms to try again.';
+  }
+  final android = _plugin.resolvePlatformSpecificImplementation<AndroidFlutterLocalNotificationsPlugin>();
+  MessagingStyleInformation? style;
+  try {
+    style = await android?.getActiveNotificationMessagingStyle(chatNotificationId(roomId));
+  } catch (_) {}
+  await _postChat(
+    roomId,
+    title: style?.conversationTitle ?? room?.groupName ?? 'Comms',
+    isGroup: room?.isGroup ?? false,
+    message: Message(problem == null ? words : '$words\n⚠ $problem', DateTime.now(), null),
+    alert: false,
   );
 }
 
@@ -143,6 +279,15 @@ Future<void> _showMissedCall(String callId, String callerName, bool isVideo) asy
   );
 }
 
+bool _nicknamesLoaded = false;
+
+/// The notification handler runs on its own, so it loads nicknames itself the first time.
+Future<void> _ensureNicknames() async {
+  if (_nicknamesLoaded) return;
+  _nicknamesLoaded = true;
+  await Nicknames.instance.load();
+}
+
 /// Declines a ringing call without opening the app.
 Future<void> declineCallInBackground(String callId) async {
   final user = FirebaseAuth.instance.currentUser ?? await FirebaseAuth.instance.authStateChanges().first;
@@ -175,39 +320,54 @@ Future<void> firebaseMessagingBackgroundHandler(RemoteMessage message) async {
         app.send(Map<String, dynamic>.from(data));
         return;
       }
-      await _showChat(data);
+      final (unlocked, key) = await _unlockChat(data);
+      await _showChat(unlocked);
       // Save the photo, video or voice note now, while the link still works.
       await MediaService.prefetch(
-        url: data['mediaUrl'] ?? '',
-        messageId: data['messageId'] ?? '',
-        name: data['mediaName'] ?? '',
-        type: data['mediaType'] ?? '',
+        url: unlocked['mediaUrl'] ?? '',
+        messageId: unlocked['messageId'] ?? '',
+        name: unlocked['mediaName'] ?? '',
+        type: unlocked['mediaType'] ?? '',
+        key: key,
       );
       break;
     case 'call':
       final sentAt = int.tryParse(data['sentAt'] ?? '') ?? 0;
       // A call that has already stopped ringing should not ring now.
       if (DateTime.now().millisecondsSinceEpoch - sentAt > 38000) return;
-      await _showIncomingCall(callId: data['id'] ?? '', callerName: data['callerName'] ?? 'Someone', isVideo: data['isVideo'] == 'true');
+      await _ensureNicknames();
+      await _showIncomingCall(
+        callId: data['id'] ?? '',
+        callerName: Nicknames.instance.name(data['callerId'] ?? '', data['callerName'] ?? 'Someone'),
+        isVideo: data['isVideo'] == 'true',
+      );
       break;
     case 'call_update':
       await _plugin.cancel(callNotificationId(data['id'] ?? ''));
       if (data['missed'] == 'true') {
-        await _showMissedCall(data['id'] ?? '', data['callerName'] ?? 'Someone', data['isVideo'] == 'true');
+        await _ensureNicknames();
+        await _showMissedCall(data['id'] ?? '', Nicknames.instance.name(data['callerId'] ?? '', data['callerName'] ?? 'Someone'), data['isVideo'] == 'true');
       }
       break;
   }
 }
 
-/// Runs when the Decline button is pressed while the app is closed.
+/// Runs when a notification button (Decline, Reply) is pressed without opening the app.
 @pragma('vm:entry-point')
 Future<void> notificationTapBackground(NotificationResponse response) async {
-  if (response.actionId != 'decline') return;
   final parts = (response.payload ?? '').split('|');
-  if (parts.length < 2 || parts[0] != 'call') return;
+  if (parts.length < 2) return;
+  final isDecline = response.actionId == 'decline' && parts[0] == 'call';
+  final isReply = response.actionId == 'reply' && parts[0] == 'chat';
+  if (!isDecline && !isReply) return;
   WidgetsFlutterBinding.ensureInitialized();
   await Firebase.initializeApp();
-  await declineCallInBackground(parts[1]);
+  if (isDecline) {
+    await declineCallInBackground(parts[1]);
+  } else {
+    await _initPlugin();
+    await replyFromNotification(parts[1], response.input ?? '');
+  }
 }
 
 class NotificationService {
@@ -239,9 +399,10 @@ class NotificationService {
   final Set<String> _handledMessages = {};
 
   /// One place decides about every chat push, however it arrived.
-  void _handleChat(Map<String, dynamic> data) {
-    final messageId = data['messageId']?.toString() ?? '';
+  Future<void> _handleChat(Map<String, dynamic> raw) async {
+    final messageId = raw['messageId']?.toString() ?? '';
     if (messageId.isNotEmpty && !_handledMessages.add(messageId)) return; // already handled
+    final (data, key) = await _unlockChat(raw);
     final looking = WidgetsBinding.instance.lifecycleState == AppLifecycleState.resumed;
     final inThatChat = looking && data['id'] == activeChatRoomId;
     if (!inThatChat) {
@@ -253,6 +414,7 @@ class NotificationService {
       messageId: messageId,
       name: data['mediaName'] ?? '',
       type: data['mediaType'] ?? '',
+      key: key,
     );
   }
 
@@ -267,7 +429,10 @@ class NotificationService {
 
     final launch = await _plugin.getNotificationAppLaunchDetails();
     if (launch?.didNotificationLaunchApp == true && launch!.notificationResponse != null) {
-      _pendingTap = _parse(launch.notificationResponse!);
+      // The home screen may already be listening by now (it often is), so hand it over
+      // the normal way rather than leaving it waiting to be picked up.
+      final tap = _parse(launch.notificationResponse!);
+      if (tap != null) _deliver(tap);
     }
 
     await _messaging.requestPermission(alert: true, badge: true, sound: true);
@@ -305,6 +470,14 @@ class NotificationService {
       declineCallInBackground(tap.id);
       return;
     }
+    if (tap.type == 'chat' && tap.action == 'reply') {
+      replyFromNotification(tap.id, response.input ?? '');
+      return;
+    }
+    _deliver(tap);
+  }
+
+  void _deliver(NotificationTap tap) {
     if (_taps.hasListener) {
       _taps.add(tap);
     } else {
@@ -324,21 +497,28 @@ class NotificationService {
   Future<void> _saveToken(String token) async {
     final uid = FirebaseAuth.instance.currentUser?.uid;
     if (uid == null) return;
-    await FirebaseFirestore.instance.collection('users').doc(uid).update({'fcmToken': token});
+    // Kept in the private document, which only this person (and the notification server) can read.
+    await _privateDoc(uid).set({'fcmToken': token}, SetOptions(merge: true));
+    try {
+      await FirebaseFirestore.instance.collection('users').doc(uid).update({'fcmToken': FieldValue.delete()});
+    } catch (_) {}
   }
 
   Future<void> forgetDevice() async {
     final uid = FirebaseAuth.instance.currentUser?.uid;
     if (uid == null) return;
     try {
-      await FirebaseFirestore.instance.collection('users').doc(uid).update({'fcmToken': FieldValue.delete()});
+      await _privateDoc(uid).set({'fcmToken': FieldValue.delete()}, SetOptions(merge: true));
       await _messaging.deleteToken();
     } catch (_) {}
   }
+
+  DocumentReference<Map<String, dynamic>> _privateDoc(String uid) =>
+      FirebaseFirestore.instance.collection('users').doc(uid).collection('private').doc('data');
 
   Future<void> cancelCall(String callId) => _plugin.cancel(callNotificationId(callId));
 
   Future<void> cancelChat(String roomId) => _plugin.cancel(chatNotificationId(roomId));
 
-  Future<void> showMissedCall(CallModel call) => _showMissedCall(call.id, call.callerName, call.isVideo);
+  Future<void> showMissedCall(CallModel call) => _showMissedCall(call.id, Nicknames.instance.name(call.callerId, call.callerName), call.isVideo);
 }

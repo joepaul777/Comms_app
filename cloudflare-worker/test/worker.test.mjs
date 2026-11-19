@@ -23,13 +23,22 @@ async function idToken(uid, { key = google.privateKey, exp = Date.now() / 1000 +
 }
 
 // Fake Firestore data
-const fields = obj => Object.fromEntries(Object.entries(obj).map(([k, v]) => [k,
-  Array.isArray(v) ? { arrayValue: { values: v.map(s => ({ stringValue: s })) } }
-    : typeof v === 'number' ? { integerValue: String(v) } : { stringValue: v }]));
+const value = v => Array.isArray(v) ? { arrayValue: { values: v.map(value) } }
+  : typeof v === 'number' ? { integerValue: String(v) }
+    : v && typeof v === 'object' ? { mapValue: { fields: fields(v) } } : { stringValue: v };
+const fields = obj => Object.fromEntries(Object.entries(obj).map(([k, v]) => [k, value(v)]));
 const db = {
   'users/alice': { uid: 'alice', name: 'Alice', fcmToken: 'tok-alice' },
   'users/bob': { uid: 'bob', name: 'Bob', fcmToken: 'tok-bob' },
   'users/eve': { uid: 'eve', name: 'Eve' },
+  // Version 2.1 keeps the notification address in a private document.
+  'users/carol': { uid: 'carol', name: 'Carol' },
+  'users/carol/private/data': { fcmToken: 'tok-carol' },
+  'chatRooms/r2': { id: 'r2', type: 'direct', participants: ['alice', 'carol'] },
+  'chatRooms/r2/messages/sec': {
+    id: 'sec', senderId: 'alice', senderName: 'Alice', text: '🔒 Update Comms to read this message', type: 'text', timestamp: Date.now(),
+    enc: { v: 1, f: 'PUB-ALICE', n: 'NONCE', c: 'SCRAMBLED', k: { alice: 'KEY-FOR-ALICE', carol: 'KEY-FOR-CAROL' } },
+  },
   'chatRooms/r1': { id: 'r1', type: 'direct', participants: ['alice', 'bob'] },
   'chatRooms/r1/messages/m1': { id: 'm1', senderId: 'alice', senderName: 'Alice', text: 'hello', type: 'text', timestamp: Date.now() },
   'chatRooms/r1/messages/old': { id: 'old', senderId: 'alice', senderName: 'Alice', text: 'old', type: 'text', timestamp: Date.now() - 3600_000 },
@@ -123,6 +132,19 @@ await test('photos announce themselves and carry the download link', async () =>
   assert.equal(sentFcm[0].data.body, '📷 Photo');
   assert.equal(sentFcm[0].data.mediaUrl, 'https://tmpfiles.org/dl/1/a.jpg');
 });
+await test('encrypted messages carry only scrambled text, and only the recipient key', async () => {
+  const r = await call('/notify/message', { token: alice, body: { chatRoomId: 'r2', messageId: 'sec' } });
+  assert.equal(r.status, 200);
+  assert.equal(sentFcm.length, 1);
+  const { token, data } = sentFcm[0];
+  assert.equal(token, 'tok-carol', 'uses the private notification address');
+  assert.equal(data.body, '🔒 New message');
+  assert.equal(data.c, 'SCRAMBLED');
+  assert.equal(data.k, 'KEY-FOR-CAROL');
+  assert.equal(data.to, 'carol');
+  assert.ok(!JSON.stringify(data).includes('KEY-FOR-ALICE'));
+  assert.ok(!('mediaUrl' in data));
+});
 await test('someone else cannot trigger a notification for Alice\'s message', async () => assert.equal((await call('/notify/message', { token: bob, body: { chatRoomId: 'r1', messageId: 'm1' } })).status, 403));
 await test('an outsider cannot use the chat', async () => assert.equal((await call('/notify/message', { token: eve, body: { chatRoomId: 'r1', messageId: 'm1' } })).status, 403));
 await test('old messages cannot be replayed as notifications', async () => {
@@ -157,7 +179,8 @@ await test('call relays come from Metered when configured', async () => {
 await test('broadcast needs the admin secret', async () => assert.equal((await call('/broadcast', { body: { title: 't', body: 'b' } })).status, 401));
 await test('broadcast reaches everyone with a device token', async () => {
   const r = await call('/broadcast', { headers: { 'X-Admin-Secret': 's3cret' }, body: { title: 'Comms 2.0', body: 'Update', url: 'https://x' } });
-  assert.equal(r.body.sent, 2);
+  assert.equal(r.body.sent, 3); // Alice and Bob (old style) and Carol (private document)
+  assert.deepEqual(sentFcm.map(m => m.token).sort(), ['tok-alice', 'tok-bob', 'tok-carol']);
   assert.ok(sentFcm.every(m => m.notification.title === 'Comms 2.0'));
 });
 await test('the service account token is reused, not re-signed every time', async () => assert.equal(oauthCalls, 1));

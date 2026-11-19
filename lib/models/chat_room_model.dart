@@ -19,6 +19,9 @@ class ChatRoomModel {
   final Map<String, int> readUpTo;
   final Map<String, int> readAt;
 
+  /// The newest message's preview, end-to-end encrypted (see E2E).
+  final Map<String, dynamic>? lastEnc;
+
   ChatRoomModel({
     required this.id,
     required this.type,
@@ -34,6 +37,7 @@ class ChatRoomModel {
     this.typing = const {},
     this.readUpTo = const {},
     this.readAt = const {},
+    this.lastEnc,
   })  : lastMessageTime = lastMessageTime ?? DateTime.now(),
         createdAt = createdAt ?? DateTime.now();
 
@@ -75,6 +79,7 @@ class ChatRoomModel {
           : DateTime.now(),
       readUpTo: _ints(map['readUpTo']),
       readAt: _ints(map['readAt']),
+      lastEnc: map['lastEnc'] is Map ? Map<String, dynamic>.from(map['lastEnc'] as Map) : null,
       typing: {
         for (final e in ((map['typing'] as Map?) ?? const {}).entries)
           if (e.value is num) e.key.toString(): (e.value as num).toInt(),
@@ -103,6 +108,10 @@ class ChatRoomModel {
       lastMessageTime: lastMessageTime ?? this.lastMessageTime,
       unreadCount: unreadCount ?? this.unreadCount,
       createdAt: createdAt,
+      typing: typing,
+      readUpTo: readUpTo,
+      readAt: readAt,
+      lastEnc: lastEnc,
     );
   }
 

@@ -1,7 +1,7 @@
 name: comms
 description: "Comms - Stay connected with your people"
 publish_to: 'none'
-version: 2.0.1+3001
+version: 2.1.0+3005
 
 environment:
   sdk: ^3.12.2
@@ -47,6 +47,9 @@ dependencies:
   record: ^7.1.1
   audioplayers: ^6.8.1
   open_filex: ^4.7.0
+  cryptography: ^2.9.0
+  cryptography_flutter: ^2.3.4
+  flutter_secure_storage: ^11.2.0
 
 dev_dependencies:
   flutter_test:
@@ -59,6 +62,7 @@ flutter_launcher_icons:
   image_path: "assets/icon/app_icon.png"
   adaptive_icon_background: "#0A0A0A"
   adaptive_icon_foreground: "assets/icon/app_icon.png"
+  adaptive_icon_monochrome: "assets/icon/app_icon_monochrome.png"
 
 flutter:
   uses-material-design: true

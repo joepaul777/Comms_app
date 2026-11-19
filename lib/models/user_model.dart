@@ -13,6 +13,9 @@ class UserModel {
   /// Set while this person is ringing or on a call, so others see them as busy.
   final DateTime? busyUntil;
 
+  /// Their phone's public encryption key (see E2E). Null on old versions of Comms.
+  final String? publicKey;
+
   // Sending limits (written together with each message or call, checked by the database)
   final Timestamp? lastMessageAt;
   final Timestamp? msgWindowStart;
@@ -31,6 +34,7 @@ class UserModel {
     this.contacts = const [],
     DateTime? createdAt,
     this.busyUntil,
+    this.publicKey,
     this.lastMessageAt,
     this.msgWindowStart,
     this.msgWindowCount = 0,
@@ -52,7 +56,6 @@ class UserModel {
       'photoUrl': photoUrl,
       'isOnline': isOnline,
       'lastSeen': lastSeen.millisecondsSinceEpoch,
-      'contacts': contacts,
       'createdAt': createdAt.millisecondsSinceEpoch,
     };
   }
@@ -69,6 +72,7 @@ class UserModel {
       contacts: List<String>.from(map['contacts'] ?? const []),
       createdAt: millis(map['createdAt']),
       busyUntil: millis(map['busyUntil']),
+      publicKey: map['publicKey'] is String && (map['publicKey'] as String).isNotEmpty ? map['publicKey'] as String : null,
       lastMessageAt: map['lastMessageAt'] is Timestamp ? map['lastMessageAt'] : null,
       msgWindowStart: map['msgWindowStart'] is Timestamp ? map['msgWindowStart'] : null,
       msgWindowCount: (map['msgWindowCount'] as num?)?.toInt() ?? 0,
@@ -77,6 +81,26 @@ class UserModel {
       callWindowCount: (map['callWindowCount'] as num?)?.toInt() ?? 0,
     );
   }
+
+  /// The same person with their private contact list (kept apart from the public profile).
+  UserModel withContacts(List<String> list) => UserModel(
+        uid: uid,
+        name: name,
+        email: email,
+        photoUrl: photoUrl,
+        isOnline: isOnline,
+        lastSeen: lastSeen,
+        contacts: list,
+        createdAt: createdAt,
+        busyUntil: busyUntil,
+        publicKey: publicKey,
+        lastMessageAt: lastMessageAt,
+        msgWindowStart: msgWindowStart,
+        msgWindowCount: msgWindowCount,
+        lastCallAt: lastCallAt,
+        callWindowStart: callWindowStart,
+        callWindowCount: callWindowCount,
+      );
 
   String get initials {
     final parts = name.trim().split(RegExp(r'\s+')).where((p) => p.isNotEmpty).toList();

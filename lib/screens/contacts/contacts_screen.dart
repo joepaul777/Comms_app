@@ -1,13 +1,13 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
-import '../../models/call_model.dart';
 import '../../models/user_model.dart';
-import '../../services/call_service.dart';
 import '../../services/user_service.dart';
 import '../../theme/app_colors.dart';
 import '../../theme/app_theme.dart';
 import '../../widgets/avatar.dart';
 import '../../widgets/ui.dart';
+import 'person_profile_screen.dart';
+import '../../services/local_prefs.dart';
 
 class ContactsScreen extends StatefulWidget {
   final UserModel me;
@@ -103,7 +103,7 @@ class _ContactsScreenState extends State<ContactsScreen> {
             contentPadding: const EdgeInsets.symmetric(horizontal: 20, vertical: 2),
             onTap: () => showPersonCard(context, me: widget.me, person: u, onMessage: widget.onMessage),
             leading: Avatar(name: u.name, photoUrl: u.photoUrl, size: 48, online: u.isOnline),
-            title: Text(u.name, style: AppTheme.body(15.5, weight: FontWeight.w600)),
+            title: Text(Nicknames.instance.name(u.uid, u.name), style: AppTheme.body(15.5, weight: FontWeight.w600)),
             subtitle: Text(u.email, style: AppTheme.body(13, color: AppColors.textMuted)),
             trailing: const Icon(Icons.chevron_right_rounded, color: AppColors.textFaint),
           ),
@@ -115,95 +115,9 @@ class _ContactsScreenState extends State<ContactsScreen> {
 
 /// A person's card with quick actions.
 Future<void> showPersonCard(BuildContext context, {required UserModel me, required UserModel person, required ValueChanged<UserModel> onMessage}) {
-  return showModalBottomSheet(
-    context: context,
-    builder: (sheet) => StreamBuilder<UserModel?>(
-      stream: UserService.instance.userStream(me.uid),
-      initialData: me,
-      builder: (_, snap) {
-        final current = snap.data ?? me;
-        final isContact = current.contacts.contains(person.uid);
-        Future<void> call(CallType type) async {
-          Navigator.pop(sheet);
-          final error = await CallService.instance.startCall(me: current, other: person, type: type);
-          if (error != null && context.mounted) showSnack(context, error, error: true);
-        }
-
-        return SafeArea(
-          child: Padding(
-            padding: const EdgeInsets.fromLTRB(24, 0, 24, 24),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Avatar(name: person.name, photoUrl: person.photoUrl, size: 84, online: person.isOnline),
-                const SizedBox(height: 12),
-                Text(person.name, style: AppTheme.display(24), textAlign: TextAlign.center),
-                const SizedBox(height: 2),
-                Text(person.email, style: AppTheme.body(14, color: AppColors.textMuted)),
-                const SizedBox(height: 22),
-                Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-                  children: [
-                    _CardAction(icon: Icons.chat_bubble_rounded, label: 'Message', onTap: () {
-                      Navigator.pop(sheet);
-                      onMessage(person);
-                    }),
-                    _CardAction(icon: Icons.call_rounded, label: 'Voice', onTap: () => call(CallType.audio)),
-                    _CardAction(icon: Icons.videocam_rounded, label: 'Video', onTap: () => call(CallType.video)),
-                  ],
-                ),
-                const SizedBox(height: 18),
-                SizedBox(
-                  width: double.infinity,
-                  child: OutlinedButton.icon(
-                    style: OutlinedButton.styleFrom(
-                      foregroundColor: isContact ? AppColors.textMuted : AppColors.primary,
-                      side: BorderSide(color: isContact ? AppColors.border : AppColors.primary),
-                      minimumSize: const Size.fromHeight(50),
-                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-                    ),
-                    onPressed: () async {
-                      if (isContact) {
-                        await UserService.instance.removeContact(me.uid, person.uid);
-                      } else {
-                        await UserService.instance.addContact(me.uid, person.uid);
-                      }
-                    },
-                    icon: Icon(isContact ? Icons.person_remove_rounded : Icons.person_add_alt_1_rounded),
-                    label: Text(isContact ? 'Remove from contacts' : 'Add contact'),
-                  ),
-                ),
-              ],
-            ),
-          ),
-        );
-      },
-    ),
-  );
+  return openProfile(context, me: me, person: person, onMessage: (p) {
+    Navigator.of(context).pop();
+    onMessage(p);
+  });
 }
 
-class _CardAction extends StatelessWidget {
-  final IconData icon;
-  final String label;
-  final VoidCallback onTap;
-  const _CardAction({required this.icon, required this.label, required this.onTap});
-
-  @override
-  Widget build(BuildContext context) {
-    return TapScale(
-      onTap: onTap,
-      child: Column(
-        children: [
-          Container(
-            width: 62,
-            height: 62,
-            decoration: BoxDecoration(color: AppColors.primary, borderRadius: BorderRadius.circular(22)),
-            child: Icon(icon, color: AppColors.textDark, size: 26),
-          ),
-          const SizedBox(height: 8),
-          Text(label, style: AppTheme.body(13, weight: FontWeight.w600)),
-        ],
-      ),
-    );
-  }
-}

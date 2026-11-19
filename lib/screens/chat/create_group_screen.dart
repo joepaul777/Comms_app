@@ -8,6 +8,7 @@ import '../../theme/app_colors.dart';
 import '../../theme/app_theme.dart';
 import '../../widgets/avatar.dart';
 import '../../widgets/ui.dart';
+import '../../services/local_prefs.dart';
 
 /// Pick people from your contacts (or by search). Returns their uids.
 class PeoplePickerScreen extends StatefulWidget {
@@ -67,7 +68,7 @@ class _PeoplePickerScreenState extends State<PeoplePickerScreen> {
       enabled: !blocked,
       onTap: () => setState(() => picked ? _selected.remove(u.uid) : _selected[u.uid] = u),
       leading: Avatar(name: u.name, photoUrl: u.photoUrl, size: 44),
-      title: Text(u.name, style: AppTheme.body(15, weight: FontWeight.w600)),
+      title: Text(Nicknames.instance.name(u.uid, u.name), style: AppTheme.body(15, weight: FontWeight.w600)),
       subtitle: Text(blocked ? 'Already in the group' : u.email, style: AppTheme.body(12.5, color: AppColors.textMuted)),
       trailing: AnimatedContainer(
         duration: const Duration(milliseconds: 180),
@@ -130,7 +131,7 @@ class _PeoplePickerScreenState extends State<PeoplePickerScreen> {
                         .map((u) => Padding(
                               padding: const EdgeInsets.symmetric(horizontal: 4),
                               child: InputChip(
-                                label: Text(u.firstName),
+                                label: Text(Nicknames.instance.name(u.uid, u.firstName)),
                                 avatar: Avatar(name: u.name, photoUrl: u.photoUrl, size: 24),
                                 onDeleted: () => setState(() => _selected.remove(u.uid)),
                                 backgroundColor: AppColors.bgElevated,

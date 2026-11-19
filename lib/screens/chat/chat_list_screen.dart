@@ -8,8 +8,10 @@ import '../../theme/app_colors.dart';
 import '../../theme/app_theme.dart';
 import '../../widgets/avatar.dart';
 import '../../widgets/ui.dart';
+import '../contacts/person_profile_screen.dart';
 import 'create_group_screen.dart';
 import 'offline_lobby_screen.dart';
+import '../../services/local_prefs.dart';
 
 class ChatListScreen extends StatefulWidget {
   final UserModel me;
@@ -81,6 +83,7 @@ class _ChatListScreenState extends State<ChatListScreen> {
                   padding: const EdgeInsets.only(bottom: 120),
                   itemCount: rooms.length,
                   itemBuilder: (context, i) => FadeSlideIn(
+                    key: ValueKey(rooms[i].id),
                     index: i,
                     child: _RoomTile(
                       room: rooms[i],
@@ -120,7 +123,7 @@ class _RoomTile extends StatelessWidget {
   }
 
   Widget _tile(BuildContext context, UserModel? other) {
-    final name = room.isGroup ? (room.groupName ?? 'Group') : (other?.name ?? '…');
+    final name = room.isGroup ? (room.groupName ?? 'Group') : (other == null ? '…' : Nicknames.instance.name(other.uid, other.name));
     if (query.isNotEmpty && !name.toLowerCase().contains(query)) return const SizedBox.shrink();
     final unread = room.unreadCount[me.uid] ?? 0;
     final mineLast = room.lastMessageSenderId == me.uid;
@@ -136,9 +139,17 @@ class _RoomTile extends StatelessWidget {
             padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 10),
             child: Row(
               children: [
-                Hero(
-                  tag: 'avatar-${room.id}',
-                  child: Avatar(name: name, photoUrl: other?.photoUrl ?? '', size: 52, online: other?.isOnline ?? false, group: room.isGroup),
+                GestureDetector(
+                  onTap: other == null
+                      ? null
+                      : () => openProfile(context, me: me, person: other, onMessage: (_) {
+                            Navigator.of(context).pop();
+                            onTap();
+                          }),
+                  child: Hero(
+                    tag: 'avatar-${room.id}',
+                    child: Avatar(name: name, photoUrl: other?.photoUrl ?? '', size: 52, online: other?.isOnline ?? false, group: room.isGroup),
+                  ),
                 ),
                 const SizedBox(width: 14),
                 Expanded(

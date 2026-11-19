@@ -1,6 +1,7 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:comms/models/call_model.dart';
 import 'package:comms/models/message_model.dart';
+import 'package:comms/services/assistant_service.dart';
 import 'package:comms/services/media_service.dart';
 import 'package:comms/services/rate_limiter.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -154,6 +155,18 @@ void main() {
       expect(ended.endReason, 'declined');
       expect(ended.otherName('a'), 'B');
       expect(ended.otherName('b'), 'A');
+    });
+  });
+
+  group('Messages from JACE', () {
+    double score(String heard, String name) => AssistantService.nameScore(AssistantService.normalize(heard), AssistantService.normalize(name));
+    test('first names and full names match', () {
+      expect(score('suji', 'Suji S'), greaterThanOrEqualTo(0.9));
+      expect(score('prathik', 'Prathik Joe Paul'), greaterThanOrEqualTo(0.9));
+      expect(score('suji', 'Prathik Joe Paul'), lessThan(0.5));
+    });
+    test('near spellings still score', () {
+      expect(score('sujee', 'Suji S'), greaterThan(0.6));
     });
   });
 }

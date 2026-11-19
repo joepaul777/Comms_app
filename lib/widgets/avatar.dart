@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
 import '../theme/app_colors.dart';
 import '../theme/app_theme.dart';
+import '../models/user_model.dart';
+import '../services/user_service.dart';
 import '../utils/image_utils.dart';
 
 class Avatar extends StatelessWidget {
@@ -42,7 +44,8 @@ class Avatar extends StatelessWidget {
             child: photoUrl.isEmpty
                 ? fallback
                 : Image(
-                    image: getImageProvider(photoUrl),
+                    // Decode at the size shown, not the full photo.
+                    image: ResizeImage(getImageProvider(photoUrl), width: (size * MediaQuery.devicePixelRatioOf(context)).round(), policy: ResizeImagePolicy.fit),
                     fit: BoxFit.cover,
                     errorBuilder: (_, _, _) => fallback,
                   ),
@@ -63,6 +66,29 @@ class Avatar extends StatelessWidget {
             ),
         ],
       ),
+    );
+  }
+}
+
+/// Someone's picture looked up from their profile, so it is always their current one
+/// (records like calls only keep a name, because photos are too big to copy into them).
+class PersonAvatar extends StatelessWidget {
+  final String uid;
+  final String name;
+  final String fallbackPhoto;
+  final double size;
+  const PersonAvatar({super.key, required this.uid, required this.name, this.fallbackPhoto = '', this.size = 48});
+
+  @override
+  Widget build(BuildContext context) {
+    if (uid.isEmpty) return Avatar(name: name, photoUrl: fallbackPhoto, size: size);
+    return StreamBuilder<UserModel?>(
+      stream: UserService.instance.userStream(uid),
+      initialData: UserService.instance.cached(uid),
+      builder: (context, snap) {
+        final photo = snap.data?.photoUrl ?? '';
+        return Avatar(name: name, photoUrl: photo.isNotEmpty ? photo : fallbackPhoto, size: size);
+      },
     );
   }
 }

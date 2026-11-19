@@ -74,20 +74,39 @@ async function getDoc(env, path) {
   return decodeDocument(await res.json());
 }
 
-async function getUsers(env, uids) {
-  if (!uids.length) return [];
-  const base = `projects/${env.PROJECT_ID}/databases/(default)/documents/users/`;
+async function batchGet(env, paths) {
+  if (!paths.length) return new Map();
+  const base = `projects/${env.PROJECT_ID}/databases/(default)/documents/`;
   const res = await fetch(
     `https://firestore.googleapis.com/v1/projects/${env.PROJECT_ID}/databases/(default)/documents:batchGet`,
     {
       method: 'POST',
       headers: { Authorization: `Bearer ${await googleToken(env)}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ documents: uids.map(uid => base + uid) }),
+      body: JSON.stringify({ documents: paths.map(p => base + p) }),
     },
   );
   if (!res.ok) throw new Error(`firestore batchGet ${res.status}`);
   const rows = await res.json();
-  return rows.filter(row => row.found).map(row => decodeDocument(row.found));
+  const found = new Map();
+  for (const row of rows) {
+    if (row.found) found.set(row.found.name.split('/documents/')[1], decodeDocument(row.found));
+  }
+  return found;
+}
+
+/**
+ * Each person's notification address. It lives in their private document
+ * (users/{uid}/private/data), which other people can't read; versions before 2.1
+ * kept it on the public profile.
+ */
+async function getTokens(env, uids) {
+  const docs = await batchGet(env, uids.flatMap(uid => [`users/${uid}`, `users/${uid}/private/data`]));
+  const tokens = new Map();
+  for (const uid of uids) {
+    const token = docs.get(`users/${uid}/private/data`)?.fcmToken || docs.get(`users/${uid}`)?.fcmToken;
+    if (token) tokens.set(uid, token);
+  }
+  return tokens;
 }
 
 /** Sends one FCM message. Returns false when the device token is no longer valid. */
@@ -133,21 +152,37 @@ async function notifyMessage(env, uid, { chatRoomId, messageId }) {
   if (Date.now() - Number(message.timestamp || 0) > 2 * 60 * 1000) return json({ sent: 0 });
 
   const recipients = (room.participants || []).filter(id => id !== uid);
-  const users = await getUsers(env, recipients);
+  const tokens = await getTokens(env, recipients);
   const isGroup = room.type === 'group';
-  const preview = PREVIEW[message.type] || String(message.text || '').slice(0, 300);
+  const enc = message.enc && typeof message.enc === 'object' ? message.enc : null;
+  // Encrypted messages: this server can't read the words, so it only says what kind of
+  // message it is; the phone unlocks the real text itself.
+  const preview = message.viewLimit
+    ? (message.type === 'video' ? '🎥 View-once video' : '📷 View-once photo')
+    : PREVIEW[message.type] || (enc ? '🔒 New message' : String(message.text || '').slice(0, 300));
   let sent = 0;
-  await Promise.all(users.filter(u => u.fcmToken).map(async user => {
-    await sendFcm(env, dataMessage(user.fcmToken, {
+  await Promise.all([...tokens].map(async ([recipient, token]) => {
+    const data = {
       type: 'chat',
       id: chatRoomId,
       messageId,
+      senderId: uid,
+      senderName: message.senderName || '',
+      isGroup: String(isGroup),
       title: isGroup ? room.groupName || 'Group' : message.senderName || 'New message',
       body: isGroup ? `${message.senderName}: ${preview}` : preview,
-      mediaUrl: message.mediaUrl || '',
-      mediaName: message.mediaName || '',
       mediaType: message.type,
-    }, 3600));
+    };
+    if (enc) {
+      // Only this person's copy of the message key, so the push stays small.
+      const wrapped = enc.k && enc.k[recipient];
+      if (wrapped && String(enc.c || '').length <= 2800) {
+        Object.assign(data, { to: recipient, f: enc.f, n: enc.n, c: enc.c, k: wrapped });
+      }
+    } else {
+      Object.assign(data, { mediaUrl: message.mediaUrl || '', mediaName: message.mediaName || '' });
+    }
+    await sendFcm(env, dataMessage(token, data, 3600));
     sent++;
   }));
   return json({ sent });
@@ -160,9 +195,9 @@ async function notifyCall(env, uid, { callId }) {
   if (call.callerId !== uid) return json({ error: 'forbidden' }, 403);
   if (call.status !== 'ringing') return json({ sent: 0 });
 
-  const [receiver] = await getUsers(env, [call.receiverId]);
-  if (!receiver || !receiver.fcmToken) return json({ sent: 0 });
-  await sendFcm(env, dataMessage(receiver.fcmToken, {
+  const token = (await getTokens(env, [call.receiverId])).get(call.receiverId);
+  if (!token) return json({ sent: 0 });
+  await sendFcm(env, dataMessage(token, {
     type: 'call',
     id: callId,
     callerName: call.callerName,
@@ -182,14 +217,15 @@ async function notifyCallUpdate(env, uid, { callId }) {
   if (uid !== call.callerId && uid !== call.receiverId) return json({ error: 'forbidden' }, 403);
 
   const otherId = uid === call.callerId ? call.receiverId : call.callerId;
-  const [other] = await getUsers(env, [otherId]);
-  if (!other || !other.fcmToken) return json({ sent: 0 });
-  await sendFcm(env, dataMessage(other.fcmToken, {
+  const token = (await getTokens(env, [otherId])).get(otherId);
+  if (!token) return json({ sent: 0 });
+  await sendFcm(env, dataMessage(token, {
     type: 'call_update',
     id: callId,
     status: call.status,
     endReason: call.endReason || '',
     callerName: call.callerName,
+    callerId: call.callerId,
     isVideo: call.type === 'video',
     missed: uid === call.callerId && call.status === 'missed',
   }, 600));
@@ -237,15 +273,24 @@ async function broadcast(request, env) {
   if (!env.ADMIN_SECRET || request.headers.get('X-Admin-Secret') !== env.ADMIN_SECRET) {
     return json({ error: 'unauthorized' }, 401);
   }
-  const { title, body, url, pageToken } = await request.json();
+  const { title, body, url, pageToken, onlyOldVersions, dryRun } = await request.json();
   const listUrl = new URL(docUrl(env, 'users'));
   listUrl.searchParams.set('pageSize', '40');
   listUrl.searchParams.append('mask.fieldPaths', 'fcmToken');
+  // Version 2 stamps these whenever someone sends a message or places a call; 1.x never does.
+  listUrl.searchParams.append('mask.fieldPaths', 'lastMessageAt');
+  listUrl.searchParams.append('mask.fieldPaths', 'lastCallAt');
   if (pageToken) listUrl.searchParams.set('pageToken', pageToken);
   const res = await fetch(listUrl, { headers: { Authorization: `Bearer ${await googleToken(env)}` } });
   if (!res.ok) throw new Error(`firestore list ${res.status}`);
   const page = await res.json();
-  const tokens = (page.documents || []).map(d => decodeDocument(d).fcmToken).filter(Boolean);
+  const users = (page.documents || []).map(d => ({ ...decodeDocument(d), uid: d.name.split('/').pop() }));
+  const chosen = users.filter(u => !(onlyOldVersions && (u.lastMessageAt || u.lastCallAt)));
+  const found = await getTokens(env, chosen.map(u => u.uid));
+  const tokens = chosen.map(u => found.get(u.uid)).filter(Boolean);
+  if (dryRun) {
+    return json({ wouldSend: tokens.length, skipped: users.length - tokens.length, nextPageToken: page.nextPageToken || null });
+  }
   let sent = 0;
   for (const token of tokens) {
     // A visible notification block, so even version 1.x shows it.

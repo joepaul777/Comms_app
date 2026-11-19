@@ -1,3 +1,4 @@
+import 'dart:io';
 import 'dart:math' as math;
 import 'dart:ui' show ImageFilter;
 import 'package:flutter/material.dart';
@@ -9,10 +10,29 @@ import '../theme/app_colors.dart';
 import '../theme/app_theme.dart';
 import 'audio_message_widget.dart';
 import 'media_message_widget.dart';
+import 'view_once_message.dart';
+import '../services/local_prefs.dart';
 
 /// The six quick reactions, plus more behind the + button.
 const quickReactions = ['👍', '❤️', '😂', '😮', '😢', '🙏'];
 const moreReactions = ['🔥', '😍', '🎉', '👏', '😡', '🤔', '💯', '😭', '🥲', '😎', '🤣', '👀', '🙌', '💀', '🤝', '✨', '😅', '🥳'];
+
+/// How many emojis a message is made of, or 0 when it has any other text.
+/// Flags and joined emojis (like a family) count as one.
+int emojiOnlyCount(String text) {
+  final t = text.trim();
+  if (t.isEmpty || RegExp(r'[A-Za-z0-9#*]').hasMatch(t)) return 0;
+  // ignore: valid_regexps
+  final allowed = RegExp(r'^(?:\p{Extended_Pictographic}|\p{Emoji_Modifier}|\p{Regional_Indicator}|\u200D|\uFE0F|\u20E3|\s)+$', unicode: true);
+  if (!allowed.hasMatch(t)) return 0;
+  // Joined sequences (with zero-width joiners) are one emoji.
+  // ignore: valid_regexps
+  final joined = t.replaceAll(RegExp(r'\u200D\p{Extended_Pictographic}', unicode: true), '');
+  // ignore: valid_regexps
+  final pictures = RegExp(r'\p{Extended_Pictographic}', unicode: true).allMatches(joined).length;
+  final flags = RegExp(r'\p{Regional_Indicator}', unicode: true).allMatches(joined).length ~/ 2;
+  return pictures + flags;
+}
 
 /// How far one of your messages has got.
 enum Receipt { none, sending, sent, seenBySome, seen }
@@ -37,6 +57,10 @@ class MessageBubble extends StatelessWidget {
   final void Function(String? emoji)? onReact;
   final VoidCallback? onEdit;
 
+  /// For view-once photos and videos.
+  final List<String> others;
+  final Future<void> Function(File file)? onOpenViewOnce;
+
   const MessageBubble({
     super.key,
     required this.message,
@@ -52,6 +76,8 @@ class MessageBubble extends StatelessWidget {
     this.receipt = Receipt.none,
     this.onReact,
     this.onEdit,
+    this.others = const [],
+    this.onOpenViewOnce,
   });
 
   @override
@@ -75,9 +101,13 @@ class MessageBubble extends StatelessWidget {
       bottomRight: Radius.circular(mine ? 6 : 20),
     );
     final fg = mine ? AppColors.textDark : AppColors.text;
-    final isVisual = message.type == MessageType.image || message.type == MessageType.video;
+    final isVisual = (message.type == MessageType.image || message.type == MessageType.video) && !message.isViewOnce;
 
     Widget content;
+    final emojis = message.type == MessageType.text ? emojiOnlyCount(message.text) : 0;
+    if (message.isViewOnce) {
+      content = ViewOnceMessage(message: message, mine: mine, myUid: myUid, others: others, onOpen: onOpenViewOnce);
+    } else {
     switch (message.type) {
       case MessageType.image:
         content = ImageMessage(message: message);
@@ -91,8 +121,15 @@ class MessageBubble extends StatelessWidget {
       default:
         content = Padding(
           padding: const EdgeInsets.fromLTRB(14, 10, 14, 2),
-          child: SelectableText(message.text, style: AppTheme.body(15.5, color: fg, height: 1.35)),
+          child: Text(
+            message.text,
+            // Messages of only a few emojis are shown larger so they stand out.
+            style: emojis > 0 && emojis <= 8
+                ? TextStyle(fontSize: emojis <= 3 ? 34 : 26, height: 1.2)
+                : AppTheme.body(15.5, color: fg, height: 1.35),
+          ),
         );
+    }
     }
 
     final body = ConstrainedBox(
@@ -112,7 +149,7 @@ class MessageBubble extends StatelessWidget {
                 if (showSender && !mine)
                   Padding(
                     padding: const EdgeInsets.fromLTRB(14, 8, 14, 0),
-                    child: Text(message.senderName, style: AppTheme.body(12.5, weight: FontWeight.w700, color: AppColors.primary)),
+                    child: Text(Nicknames.instance.name(message.senderId, message.senderName), style: AppTheme.body(12.5, weight: FontWeight.w700, color: AppColors.primary)),
                   ),
                 if (message.replyToId != null) _ReplyQuote(message: message, mine: mine),
                 if (isVisual && message.replyToId != null) const SizedBox(height: 6),
@@ -241,7 +278,7 @@ class MessageBubble extends StatelessWidget {
             for (final e in entries)
               ListTile(
                 leading: Text(e.value, style: const TextStyle(fontSize: 26)),
-                title: Text(e.key == myUid ? 'You' : (UserService.instance.cached(e.key)?.name ?? 'Someone')),
+                title: Text(e.key == myUid ? 'You' : Nicknames.instance.name(e.key, UserService.instance.cached(e.key)?.name ?? 'Someone')),
                 subtitle: e.key == myUid ? const Text('Tap to remove') : null,
                 onTap: e.key == myUid
                     ? () {
@@ -596,79 +633,6 @@ class _RingPainter extends CustomPainter {
   bool shouldRepaint(_RingPainter old) => old.fill != fill || old.color != color;
 }
 
-/// Sits under the newest of your messages that has been seen, showing who saw it and when.
-/// It hops to the next message as soon as that one is seen.
-class SeenMarker extends StatelessWidget {
-  final List<String> viewerIds;
-  final DateTime? at;
-  final bool group;
-  const SeenMarker({super.key, required this.viewerIds, this.at, this.group = false});
-
-  @override
-  Widget build(BuildContext context) {
-    final users = viewerIds.map((id) => UserService.instance.cached(id)).toList();
-    final label = group
-        ? 'Seen by ${viewerIds.length}'
-        : 'Seen${at == null ? '' : ' ${_when(at!)}'}';
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(48, 2, 14, 4),
-      child: Align(
-        alignment: Alignment.centerRight,
-        child: Appear(
-          alignment: Alignment.topRight,
-          child: Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              SizedBox(
-                width: 16.0 + (math.min(users.length, 3) - 1) * 10,
-                height: 16,
-                child: Stack(
-                  children: [
-                    for (var i = 0; i < math.min(users.length, 3); i++)
-                      Positioned(
-                        left: i * 10.0,
-                        child: Container(
-                          decoration: BoxDecoration(shape: BoxShape.circle, border: Border.all(color: AppColors.bg, width: 1.5)),
-                          child: _MiniAvatar(name: users[i]?.name ?? '?', photoUrl: users[i]?.photoUrl ?? ''),
-                        ),
-                      ),
-                  ],
-                ),
-              ),
-              const SizedBox(width: 6),
-              Text(label, style: AppTheme.body(11.5, weight: FontWeight.w600, color: AppColors.textMuted)),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-
-  static String _when(DateTime t) {
-    final now = DateTime.now();
-    if (now.difference(t).inMinutes < 1) return 'just now';
-    if (DateUtils.isSameDay(now, t)) return DateFormat.jm().format(t);
-    return DateFormat('d MMM, ').add_jm().format(t);
-  }
-}
-
-class _MiniAvatar extends StatelessWidget {
-  final String name;
-  final String photoUrl;
-  const _MiniAvatar({required this.name, required this.photoUrl});
-
-  @override
-  Widget build(BuildContext context) {
-    final initial = name.trim().isEmpty ? '?' : name.trim()[0].toUpperCase();
-    final image = photoUrl.startsWith('http') ? NetworkImage(photoUrl) as ImageProvider : null;
-    return CircleAvatar(
-      radius: 7,
-      backgroundColor: AppColors.primary,
-      backgroundImage: image,
-      child: image == null ? Text(initial, style: AppTheme.body(8, weight: FontWeight.w800, color: AppColors.textDark)) : null,
-    );
-  }
-}
 
 /// Drag a message to the right to reply. It moves a short way with growing
 /// resistance, shows a reply icon, and springs back when let go.

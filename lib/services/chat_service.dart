@@ -6,8 +6,11 @@ import '../config.dart';
 import '../models/chat_room_model.dart';
 import '../models/message_model.dart';
 import '../models/user_model.dart';
+import 'e2e_service.dart';
 import 'push_api.dart';
 import 'rate_limiter.dart';
+import 'shared_stream.dart';
+import 'user_service.dart';
 
 class ChatService {
   ChatService._();
@@ -73,27 +76,103 @@ class ChatService {
   }
 
   Stream<List<ChatRoomModel>> chatRooms(String uid) {
-    return _db.collection('chatRooms').where('participants', arrayContains: uid).snapshots().map((snapshot) {
-      final rooms = snapshot.docs.map((d) => ChatRoomModel.fromMap(d.data())).toList();
+    return _db.collection('chatRooms').where('participants', arrayContains: uid).snapshots().asyncMap((snapshot) async {
+      final rooms = <ChatRoomModel>[];
+      for (final d in snapshot.docs) {
+        rooms.add(await _openPreview(ChatRoomModel.fromMap(d.data())));
+      }
       rooms.sort((a, b) => b.lastMessageTime.compareTo(a.lastMessageTime));
       return rooms;
     });
+  }
+
+  static const lockedPreview = '🔒 Message';
+
+  /// Fills in the chat list preview from its encrypted copy.
+  Future<ChatRoomModel> _openPreview(ChatRoomModel room) async {
+    final enc = room.lastEnc;
+    if (enc == null) return room;
+    final opened = await E2E.instance.open(enc, aad: E2E.lastAad(room.id));
+    return room.copyWith(lastMessage: opened?.payload['t'] as String? ?? lockedPreview);
+  }
+
+  /// Unlocks an encrypted message (plain old messages pass straight through).
+  Future<MessageModel> _open(String roomId, MessageModel m) async {
+    final enc = m.enc;
+    if (enc == null) return m;
+    final opened = await E2E.instance.open(enc, aad: E2E.messageAad(roomId, m.id));
+    return m.withContents(opened?.payload, opened?.contentKey);
+  }
+
+  /// Everyone in the chat who can receive encrypted messages: user id -> public key.
+  /// In a two-person chat the other person must have a key; in a group, anyone still
+  /// on an old version is left out (and sees "update Comms to read this").
+  Future<Map<String, String>> recipientKeys(ChatRoomModel room, String myUid) async {
+    if (!await E2E.instance.ready() || E2E.instance.uid != myUid) {
+      throw StateError('Encryption is not set up on this phone');
+    }
+    final others = room.participants.where((id) => id != myUid).toList();
+    // Keys can change (a new phone), so don't trust a copy older than a few minutes.
+    final users = {for (final u in await UserService.instance.getUsers(others, maxAge: const Duration(minutes: 5))) u.uid: u};
+    final keys = <String, String>{myUid: E2E.instance.publicKey!};
+    final missing = <String>[];
+    for (final id in others) {
+      var key = users[id]?.publicKey;
+      // They may have only just updated.
+      key ??= (await UserService.instance.getUser(id, fresh: true))?.publicKey;
+      if (key == null) {
+        missing.add(id);
+      } else {
+        keys[id] = key;
+      }
+    }
+    if (missing.isNotEmpty && !room.isGroup) throw NoKeyException(missing);
+    return keys;
   }
 
   Stream<ChatRoomModel?> chatRoom(String id) {
     return _db.collection('chatRooms').doc(id).snapshots().map((d) => d.exists ? ChatRoomModel.fromMap(d.data()!) : null);
   }
 
-  /// Newest first, which suits a reversed chat list.
-  Stream<List<MessageModel>> messages(String roomId, {int limit = 300}) {
-    return _db
-        .collection('chatRooms')
-        .doc(roomId)
-        .collection('messages')
-        .orderBy('timestamp', descending: true)
-        .limit(limit)
-        .snapshots(includeMetadataChanges: true)
-        .map((s) => s.docs.map((d) => MessageModel.fromMap(d.data(), pending: d.metadata.hasPendingWrites)).toList());
+  final Map<String, SharedStream<List<MessageModel>>> _messageStreams = {};
+
+  /// The newest [limit] messages, newest first (which suits a reversed list).
+  /// Shared between screens, and only messages that changed are read again.
+  Stream<List<MessageModel>> messages(String roomId, {int limit = 60}) {
+    final key = '$roomId|$limit';
+    return (_messageStreams[key] ??= SharedStream<List<MessageModel>>(
+      () {
+        final parsed = <String, MessageModel>{};
+        return _db
+            .collection('chatRooms')
+            .doc(roomId)
+            .collection('messages')
+            .orderBy('timestamp', descending: true)
+            .limit(limit)
+            .snapshots(includeMetadataChanges: true)
+            .asyncMap((s) async {
+          for (final change in s.docChanges) {
+            if (change.type == DocumentChangeType.removed) {
+              parsed.remove(change.doc.id);
+            } else {
+              parsed[change.doc.id] = await _open(roomId, MessageModel.fromMap(change.doc.data()!, pending: change.doc.metadata.hasPendingWrites));
+            }
+          }
+          final list = <MessageModel>[];
+          for (final d in s.docs) {
+            final m = parsed[d.id];
+            if (m != null && m.pending == d.metadata.hasPendingWrites) {
+              list.add(m);
+            } else {
+              list.add(parsed[d.id] = await _open(roomId, MessageModel.fromMap(d.data(), pending: d.metadata.hasPendingWrites)));
+            }
+          }
+          return list;
+        });
+      },
+      onClosed: () => _messageStreams.remove(key),
+    ))
+        .stream;
   }
 
   static String previewFor(MessageType type, String text) {
@@ -123,9 +202,12 @@ class ChatService {
     String? mediaName,
     int? mediaSize,
     int? durationMs,
+    int? viewLimit,
     MessageModel? replyTo,
+    List<int>? contentKey,
   }) async {
     if (type != MessageType.system) _gate.check();
+    final replyText = replyTo == null ? null : previewFor(replyTo.type, replyTo.text);
     final message = MessageModel(
       id: id ?? newId(),
       senderId: sender.uid,
@@ -137,10 +219,36 @@ class ChatService {
       mediaName: mediaName,
       mediaSize: mediaSize,
       durationMs: durationMs,
+      viewLimit: viewLimit,
       replyToId: replyTo?.id,
-      replyToText: replyTo == null ? null : previewFor(replyTo.type, replyTo.text),
+      replyToText: replyText,
       replyToSenderName: replyTo?.senderName,
     );
+
+    var stored = message.toMap();
+    var preview = viewLimit != null ? (type == MessageType.video ? '🎥 View-once video' : '📷 View-once photo') : previewFor(type, text);
+    Map<String, dynamic>? lastEnc;
+    if (type != MessageType.system) {
+      // Only the people in the chat can read what is in it; the database just holds scrambled bytes.
+      final keys = await recipientKeys(room, sender.uid);
+      final contents = MessageModel.contentsOf(
+        text: text,
+        mediaUrl: mediaUrl,
+        mediaName: mediaName,
+        replyToText: replyText,
+        replyToSenderName: replyTo?.senderName,
+      );
+      final enc = await E2E.instance.seal(contents, keys, aad: E2E.messageAad(room.id, message.id), contentKey: contentKey);
+      stored = {
+        for (final e in stored.entries)
+          if (!const {'mediaUrl', 'mediaName', 'replyToText', 'replyToSenderName'}.contains(e.key)) e.key: e.value,
+        'text': E2E.compatText,
+        'enc': enc,
+      };
+      lastEnc = await E2E.instance.seal({'t': preview}, keys, aad: E2E.lastAad(room.id));
+      // What shows where the preview can't be unlocked: never the words themselves.
+      if (type == MessageType.text) preview = lockedPreview;
+    }
 
     final current = me?.uid == sender.uid ? me! : sender;
     final newWindow = SendGate.startsNewWindow(current.msgWindowStart, const Duration(minutes: 1), DateTime.now());
@@ -148,9 +256,10 @@ class ChatService {
     Future<void> commit(bool startWindow) {
       final batch = _db.batch();
       final roomRef = _db.collection('chatRooms').doc(room.id);
-      batch.set(roomRef.collection('messages').doc(message.id), message.toMap());
+      batch.set(roomRef.collection('messages').doc(message.id), stored);
       batch.update(roomRef, {
-        'lastMessage': previewFor(type, text),
+        'lastMessage': preview,
+        'lastEnc': lastEnc ?? FieldValue.delete(),
         'lastMessageSenderId': sender.uid,
         'lastMessageTime': message.timestamp.millisecondsSinceEpoch,
         for (final uid in room.participants)
@@ -205,19 +314,41 @@ class ChatService {
   }
 
   /// Changes the words of one of your own recent text messages.
-  Future<void> editMessage(ChatRoomModel room, MessageModel message, String text) {
+  Future<void> editMessage(ChatRoomModel room, MessageModel message, String text) async {
+    final keys = await recipientKeys(room, message.senderId);
+    final contents = MessageModel.contentsOf(text: text, replyToText: message.replyToText, replyToSenderName: message.replyToSenderName);
     final batch = _db.batch();
     final roomRef = _db.collection('chatRooms').doc(room.id);
     batch.update(roomRef.collection('messages').doc(message.id), {
-      'text': text,
+      'text': E2E.compatText,
+      'enc': await E2E.instance.seal(contents, keys, aad: E2E.messageAad(room.id, message.id)),
       'editedAt': DateTime.now().millisecondsSinceEpoch,
     });
     // Keep the chat list preview right when the newest message is the one edited.
     if (room.lastMessageSenderId == message.senderId &&
         room.lastMessageTime.millisecondsSinceEpoch == message.timestamp.millisecondsSinceEpoch) {
-      batch.update(roomRef, {'lastMessage': text});
+      batch.update(roomRef, {
+        'lastMessage': lockedPreview,
+        'lastEnc': await E2E.instance.seal({'t': text}, keys, aad: E2E.lastAad(room.id)),
+      });
     }
-    return batch.commit();
+    await batch.commit();
+  }
+
+  /// Uses up one view of a view-once photo or video. Returns how many times this person
+  /// has now opened it, or null when there are no views left.
+  Future<int?> useView(String roomId, String messageId, String uid) {
+    final ref = _db.collection('chatRooms').doc(roomId).collection('messages').doc(messageId);
+    return _db.runTransaction<int?>((tx) async {
+      final snap = await tx.get(ref);
+      final data = snap.data();
+      if (data == null) return null;
+      final limit = (data['viewLimit'] as num?)?.toInt() ?? 0;
+      final seen = ((data['viewedBy'] as Map?)?[uid] as num?)?.toInt() ?? 0;
+      if (seen >= limit) return null;
+      tx.update(ref, {'viewedBy.$uid': seen + 1});
+      return seen + 1;
+    });
   }
 
   /// Sets this person's reaction to a message, or removes it when [emoji] is null.

@@ -1,8 +1,12 @@
 rules_version = '2';
 
-// Comms 2.0 security rules.
+// Comms 2.1 security rules.
 //  - Only signed-in users can use the database.
 //  - People only see chats they are in, and calls they are part of.
+//  - Messages are end-to-end encrypted: new messages must arrive locked, with no
+//    readable words, links or file names in them.
+//  - Contact lists and notification addresses are private to their owner.
+//  - Profiles can be looked up a few at a time, never downloaded all at once.
 //  - Sending is rate limited: a message has to be written together with an update
 //    to the sender's own user document, and that update is only allowed if the
 //    sender is not going faster than the limits below.
@@ -58,7 +62,8 @@ service cloud.firestore {
     }
 
     match /users/{uid} {
-      allow read: if signedIn();
+      allow get: if signedIn();
+      allow list: if signedIn() && request.query.limit <= 30;
       allow create: if signedIn() && me() == uid
                     && request.resource.data.uid == uid
                     && !('lastMessageAt' in request.resource.data)
@@ -73,6 +78,11 @@ service cloud.firestore {
       match /contacts/{contactId} {
         allow read, write: if signedIn() && me() == uid;
       }
+
+      // Contact list and notification address: only the owner.
+      match /private/{docId} {
+        allow read, write: if signedIn() && me() == uid;
+      }
     }
 
     function room(roomId) {
@@ -83,25 +93,72 @@ service cloud.firestore {
       return me() in room(roomId).participants;
     }
 
+    // An encrypted payload (see the app's E2E service).
+    function validEnc(enc) {
+      return enc is map
+             && enc.keys().hasAll(['v', 'f', 'n', 'c', 'k'])
+             && enc.f is string && enc.f.size() <= 64
+             && enc.n is string && enc.n.size() <= 32
+             && enc.c is string && enc.c.size() <= 24000
+             && enc.k is map && enc.k.size() <= 101;
+    }
+
+    // The only words a locked message may show in the clear: older versions of Comms
+    // display this instead of the message. Must match E2E.compatText in the app.
+    function lockedText(text) {
+      return text in ['', '🔒 Update Comms to read this message'];
+    }
+
+    // Only your own entry in a per-person map (typing, read receipts).
+    function ownEntryOnly(field) {
+      return request.resource.data.get(field, {}).diff(resource.data.get(field, {})).affectedKeys().hasOnly([me()]);
+    }
+
     match /chatRooms/{roomId} {
       allow read: if signedIn() && me() in resource.data.participants;
       allow create: if signedIn()
                     && me() in request.resource.data.participants
                     && request.resource.data.participants.size() >= 2
                     && request.resource.data.participants.size() <= 100
-                    && request.resource.data.id == roomId;
+                    && request.resource.data.id == roomId
+                    // nobody can make someone else the admin of a group they started
+                    && request.resource.data.get('adminId', null) in [null, me()];
       allow update: if signedIn()
                     && me() in resource.data.participants
                     && request.resource.data.id == resource.data.id
                     && request.resource.data.type == resource.data.type
+                    && unchanged(request.resource.data, resource.data, 'adminId')
                     // two-person chats always keep the same two people
                     && (resource.data.type == 'group'
-                        || request.resource.data.participants == resource.data.participants);
+                        || request.resource.data.participants == resource.data.participants)
+                    // only the admin renames a group or adds and removes people;
+                    // anyone may leave
+                    && (resource.data.get('adminId', '') == me()
+                        || (unchanged(request.resource.data, resource.data, 'groupName')
+                            && unchanged(request.resource.data, resource.data, 'groupIcon')
+                            && (request.resource.data.participants == resource.data.participants
+                                || request.resource.data.participants == resource.data.participants.removeAll([me()]))))
+                    && ownEntryOnly('typing')
+                    && ownEntryOnly('readUpTo')
+                    && ownEntryOnly('readAt')
+                    && (!('lastEnc' in request.resource.data) || validEnc(request.resource.data.lastEnc));
       allow delete: if signedIn()
                     && me() in resource.data.participants
                     && (resource.data.type != 'group' || resource.data.get('adminId', '') == me());
 
       match /messages/{messageId} {
+        // Opening a view-once photo or video: only your own count, one more each time, never past the limit.
+        function viewedOnce() {
+          let before = resource.data.get('viewedBy', {});
+          let after = request.resource.data.get('viewedBy', {});
+          return resource.data.get('viewLimit', 0) > 0
+                 && resource.data.senderId != me()
+                 && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['viewedBy'])
+                 && after.diff(before).affectedKeys().hasOnly([me()])
+                 && after[me()] == before.get(me(), 0) + 1
+                 && after[me()] <= resource.data.viewLimit;
+        }
+
         function ownReactionOnly() {
           let before = resource.data.get('reactions', {});
           let after = request.resource.data.get('reactions', {});
@@ -115,8 +172,19 @@ service cloud.firestore {
                       && request.resource.data.senderId == me()
                       && request.resource.data.id == messageId
                       && request.resource.data.text is string
-                      && request.resource.data.text.size() <= 4000
                       && request.resource.data.type in ['text', 'image', 'video', 'audio', 'gif', 'system']
+                      // Everything people write is locked. Only short notes like
+                      // "Joe created the group" are plain, and never carry files.
+                      && (request.resource.data.type == 'system'
+                          ? (request.resource.data.text.size() <= 300 && !('enc' in request.resource.data))
+                          : (validEnc(request.resource.data.enc)
+                             && lockedText(request.resource.data.text)))
+                      && !('mediaUrl' in request.resource.data)
+                      && !('mediaName' in request.resource.data)
+                      && !('replyToText' in request.resource.data)
+                      // view-once media may be opened once or twice, and starts unopened
+                      && (!('viewLimit' in request.resource.data) || request.resource.data.viewLimit in [1, 2])
+                      && !('viewedBy' in request.resource.data)
                       // written in the same batch as the sender's rate-limit update
                       && getAfter(/databases/$(database)/documents/users/$(me())).data.lastMessageAt == request.time;
         // people in the chat may mark it seen and set or remove their own reaction;
@@ -124,12 +192,12 @@ service cloud.firestore {
         allow update: if signedIn() && inRoom(roomId)
                       && ((request.resource.data.diff(resource.data).affectedKeys().hasOnly(['isRead', 'readBy', 'reactions'])
                            && ownReactionOnly())
+                          || viewedOnce()
                           || (resource.data.senderId == me()
                               && resource.data.type == 'text'
-                              && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['text', 'editedAt'])
-                              && request.resource.data.text is string
-                              && request.resource.data.text.size() > 0
-                              && request.resource.data.text.size() <= 4000
+                              && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['text', 'enc', 'editedAt'])
+                              && validEnc(request.resource.data.enc)
+                              && lockedText(request.resource.data.text)
                               && request.time.toMillis() - resource.data.timestamp < 16 * 60 * 1000));
         // your own messages; in a two-person chat either person can clear the whole chat;
         // in a group the admin can.

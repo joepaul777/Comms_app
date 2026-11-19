@@ -7,6 +7,7 @@ import '../../theme/app_colors.dart';
 import '../../theme/app_theme.dart';
 import '../../widgets/avatar.dart';
 import '../../widgets/ui.dart';
+import '../../services/local_prefs.dart';
 
 /// The one screen for every stage of a call. It closes itself when the call is over.
 class CallScreen extends StatefulWidget {
@@ -92,7 +93,7 @@ class _CallScreenState extends State<CallScreen> with TickerProviderStateMixin {
   Widget build(BuildContext context) {
     final call = _calls.call;
     if (call == null) return const Scaffold(backgroundColor: AppColors.bg);
-    final name = call.otherName(_calls.myUid);
+    final name = Nicknames.instance.name(call.otherId(_calls.myUid), call.otherName(_calls.myUid));
     final photo = call.otherPhoto(_calls.myUid);
     final videoLive = call.isVideo && _calls.remoteStream != null && _calls.phase == CallPhase.connected;
     final showLocalVideo = call.isVideo && _calls.localStream != null && !_calls.cameraOff && _calls.phase != CallPhase.ended;
@@ -129,7 +130,7 @@ class _CallScreenState extends State<CallScreen> with TickerProviderStateMixin {
                           child: Column(
                             mainAxisSize: MainAxisSize.min,
                             children: [
-                              _pulsingAvatar(name, photo),
+                              _pulsingAvatar(name, photo, call.otherId(_calls.myUid)),
                               const SizedBox(height: 28),
                               Text(name, style: AppTheme.display(30), textAlign: TextAlign.center),
                               const SizedBox(height: 8),
@@ -233,7 +234,7 @@ class _CallScreenState extends State<CallScreen> with TickerProviderStateMixin {
     );
   }
 
-  Widget _pulsingAvatar(String name, String photo) {
+  Widget _pulsingAvatar(String name, String photo, String uid) {
     final ringing = _calls.phase == CallPhase.outgoing || _calls.phase == CallPhase.incoming || _calls.phase == CallPhase.connecting;
     return SizedBox(
       width: 220,
@@ -262,7 +263,7 @@ class _CallScreenState extends State<CallScreen> with TickerProviderStateMixin {
           AnimatedScale(
             scale: _calls.phase == CallPhase.ended ? 0.92 : 1,
             duration: const Duration(milliseconds: 300),
-            child: Avatar(name: name, photoUrl: photo, size: 120),
+            child: PersonAvatar(uid: uid, name: name, fallbackPhoto: photo, size: 120),
           ),
         ],
       ),

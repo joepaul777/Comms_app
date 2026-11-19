@@ -8,6 +8,9 @@ import '../../theme/app_theme.dart';
 import '../../widgets/avatar.dart';
 import '../../widgets/ui.dart';
 import 'create_group_screen.dart';
+import '../contacts/person_profile_screen.dart';
+import 'chat_screen.dart';
+import '../../services/local_prefs.dart';
 
 Future<void> showGroupInfo(BuildContext context, ChatRoomModel room, UserModel me) {
   return showModalBottomSheet(
@@ -105,7 +108,15 @@ class _GroupInfo extends StatelessWidget {
               ListTile(
                 contentPadding: EdgeInsets.zero,
                 leading: Avatar(name: m.name, photoUrl: m.photoUrl, size: 42, online: m.isOnline),
-                title: Text(m.uid == me.uid ? '${m.name} (you)' : m.name, style: AppTheme.body(15, weight: FontWeight.w600)),
+                onTap: m.uid == me.uid
+                    ? null
+                    : () => openProfile(context, me: me, person: m, onMessage: (person) async {
+                          final nav = Navigator.of(context);
+                          final room = await ChatService.instance.getOrCreateDirectChat(me.uid, person.uid);
+                          nav.popUntil((r) => r.isFirst);
+                          nav.push(MaterialPageRoute(builder: (_) => ChatScreen(room: room, me: me)));
+                        }),
+                title: Text(m.uid == me.uid ? '${m.name} (you)' : Nicknames.instance.name(m.uid, m.name), style: AppTheme.body(15, weight: FontWeight.w600)),
                 subtitle: Text(m.uid == room.adminId ? 'Admin' : m.email, style: AppTheme.body(12.5, color: AppColors.textMuted)),
                 trailing: _isAdmin && m.uid != me.uid
                     ? IconButton(

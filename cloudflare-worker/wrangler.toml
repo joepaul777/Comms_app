@@ -9,7 +9,7 @@ METERED_DOMAIN = "joepaul.metered.live"
 
 # The newest Comms release. Raise LATEST_BUILD (it must match the "+number" in
 # pubspec.yaml) and redeploy, and every phone on an older build is offered the update.
-LATEST_VERSION = "2.0.0"
-LATEST_BUILD = "5000"
+LATEST_VERSION = "2.0.4"
+LATEST_BUILD = "5004"
 DOWNLOAD_URL = "https://joepaul.vercel.app/downloads/Comms.apk"
-RELEASE_NOTES = "Brand new look, voice messages, reliable calls that show when they are declined, and spam protection."
+RELEASE_NOTES = "View other people's profiles, send photos and videos that can only be viewed once (or twice), set a different wallpaper for each chat, give anyone a nickname only you can see, and emoji-only messages now show bigger. Check for updates anytime in Settings."

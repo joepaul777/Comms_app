@@ -27,11 +27,20 @@
     <!-- Lets the "Update" button open Android's installer for the new version -->
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES"/>
 
+        <!-- Lets JACE (signed with the same key) ask Comms to send a message. -->
+    <permission
+        android:name="com.comms.app.permission.ASSISTANT"
+        android:label="Send Comms messages for you"
+        android:protectionLevel="signature" />
+
     <application
         android:label="Comms"
         android:name="${applicationName}"
         android:icon="@mipmap/ic_launcher"
-        android:usesCleartextTraffic="true">
+        android:allowBackup="false"
+        android:fullBackupContent="false"
+        android:dataExtractionRules="@xml/data_extraction_rules"
+        android:usesCleartextTraffic="false">
         <activity
             android:name=".MainActivity"
             android:exported="true"
@@ -80,6 +89,19 @@
             android:name="com.yalantis.ucrop.UCropActivity"
             android:screenOrientation="portrait"
             android:theme="@style/Theme.AppCompat.Light.NoActionBar"/>
+            <activity
+            android:name=".AssistantSendActivity"
+            android:exported="true"
+            android:permission="com.comms.app.permission.ASSISTANT"
+            android:theme="@android:style/Theme.Translucent.NoTitleBar"
+            android:excludeFromRecents="true"
+            android:noHistory="true"
+            android:taskAffinity="">
+            <intent-filter>
+                <action android:name="com.comms.app.action.ASSISTANT_SEND" />
+                <category android:name="android.intent.category.DEFAULT" />
+            </intent-filter>
+        </activity>
     </application>
     <!-- Required to query activities that can process text, see:
          https://developer.android.com/training/package-visibility and

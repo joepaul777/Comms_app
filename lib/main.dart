@@ -4,9 +4,13 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'screens/auth/login_screen.dart';
 import 'screens/home/home_screen.dart';
+import 'services/app_lock.dart';
+import 'services/call_service.dart';
 import 'services/notification_service.dart';
 import 'theme/app_colors.dart';
 import 'theme/app_theme.dart';
+import 'services/local_prefs.dart';
+import 'widgets/lock_screen.dart';
 
 final GlobalKey<NavigatorState> navigatorKey = GlobalKey<NavigatorState>();
 
@@ -19,6 +23,7 @@ Future<void> main() async {
     systemNavigationBarColor: AppColors.bg,
     systemNavigationBarIconBrightness: Brightness.light,
   ));
+  await Future.wait([Nicknames.instance.load(), Wallpapers.instance.load(), AppLock.instance.load()]);
   runApp(const CommsApp());
   NotificationService.instance.initialize();
 }
@@ -28,11 +33,27 @@ class CommsApp extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return MaterialApp(
+    // Redraws names everywhere when you give someone a nickname.
+    return ListenableBuilder(
+      listenable: Nicknames.instance,
+      builder: (context, _) => MaterialApp(
       title: 'Comms',
       debugShowCheckedModeBanner: false,
       theme: AppTheme.darkTheme,
       navigatorKey: navigatorKey,
+      // App lock covers everything, except a call (so it can still be answered).
+      builder: (context, child) => ListenableBuilder(
+        listenable: Listenable.merge([AppLock.instance, CallService.instance]),
+        builder: (context, _) {
+          final cover = AppLock.instance.locked && !CallService.instance.isActive;
+          return Stack(
+            children: [
+              child ?? const SizedBox.shrink(),
+              if (cover) const Positioned.fill(child: LockScreen()),
+            ],
+          );
+        },
+      ),
       home: StreamBuilder<User?>(
         stream: FirebaseAuth.instance.authStateChanges(),
         builder: (context, snapshot) {
@@ -46,6 +67,7 @@ class CommsApp extends StatelessWidget {
           }
           return AnimatedSwitcher(duration: const Duration(milliseconds: 350), child: page);
         },
+      ),
       ),
     );
   }

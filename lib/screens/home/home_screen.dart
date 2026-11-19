@@ -4,13 +4,18 @@ import 'package:flutter/material.dart';
 import '../../main.dart';
 import '../../models/chat_room_model.dart';
 import '../../models/user_model.dart';
+import '../../services/assistant_service.dart';
 import '../../services/call_service.dart';
+import '../../services/rate_limiter.dart';
 import '../../services/chat_service.dart';
+import '../../services/e2e_service.dart';
+import '../../services/local_prefs.dart';
 import '../../services/notification_service.dart';
 import '../../services/update_service.dart';
 import '../../services/user_service.dart';
 import '../../theme/app_colors.dart';
 import '../../theme/app_theme.dart';
+import '../../widgets/avatar.dart';
 import '../../widgets/ui.dart';
 import '../call/call_history_screen.dart';
 import '../call/call_screen.dart';
@@ -39,7 +44,7 @@ const _tabs = [
   _Tab(Icons.chat_bubble_outline_rounded, Icons.chat_bubble_rounded, 'Chats'),
   _Tab(Icons.call_outlined, Icons.call_rounded, 'Calls'),
   _Tab(Icons.people_outline_rounded, Icons.people_rounded, 'People'),
-  _Tab(Icons.person_outline_rounded, Icons.person_rounded, 'You'),
+  _Tab(Icons.settings_outlined, Icons.settings_rounded, 'Settings'),
 ];
 
 class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
@@ -47,6 +52,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   StreamSubscription? _meSub;
   StreamSubscription? _incomingSub;
   StreamSubscription? _tapSub;
+  StreamSubscription? _assistantSub;
   UserModel? _me;
   int _tab = 0;
   ChatRoomModel? _openRoom; // the chat shown on the right on wide screens
@@ -57,18 +63,33 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    // Start loading this phone's encryption key straight away; chats wait for it.
+    E2E.instance.load(widget.uid).catchError((Object e) => debugPrint('e2e load failed: $e'));
     _meSub = UserService.instance.userStream(widget.uid).listen((me) {
       if (me == null) return;
       ChatService.instance.me = me;
       final first = _me == null;
-      setState(() => _me = me);
+      final old = _me;
+      // The profile is rewritten on every message sent (spam limits); only redraw when
+      // something on screen actually changed.
+      final changed = old == null ||
+          old.name != me.name ||
+          old.photoUrl != me.photoUrl ||
+          old.email != me.email ||
+          old.contacts.length != me.contacts.length ||
+          !old.contacts.toSet().containsAll(me.contacts);
+      _me = me;
+      if (changed) setState(() {});
       if (first) _onReady();
     });
     _calls.addListener(_onCallChange);
+    Nicknames.instance.addListener(_namesChanged);
   }
 
   void _onReady() {
     UserService.instance.setOnline(widget.uid, true);
+    UserService.instance.movePrivateData(widget.uid);
+    _setUpEncryption();
     NotificationService.instance.saveDeviceToken();
     _calls.cleanupStale(widget.uid);
     _incomingSub = _calls.incomingCalls(widget.uid).listen((ringing) async {
@@ -80,6 +101,126 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     final pending = NotificationService.instance.takePendingTap();
     if (pending != null) _handleTap(pending);
     Future.delayed(const Duration(seconds: 3), _offerUpdate);
+    _assistantSub = AssistantService.instance.requests.listen(_handleAssistant);
+    AssistantService.instance.takePending().then((r) {
+      if (r != null) _handleAssistant(r);
+    });
+  }
+
+  /// Publishes this phone's encryption key, so people can send it messages.
+  Future<void> _setUpEncryption() async {
+    try {
+      await E2E.instance.load(widget.uid);
+    } catch (_) {
+      if (mounted) showSnack(context, 'Could not set up encryption on this phone', error: true);
+      return;
+    }
+    final mine = E2E.instance.publicKey;
+    final me = await UserService.instance.getUser(widget.uid, fresh: true).catchError((_) => null);
+    if (mine == null || me == null || !mounted || me.publicKey == mine) return;
+    // First time, or a fresh install / new phone: this phone takes over.
+    if (me.publicKey == null || E2E.instance.createdNow) {
+      await UserService.instance.setPublicKey(widget.uid, mine);
+      return;
+    }
+    // Comms was set up on another phone since this one was last used.
+    final useHere = await showDialog<bool>(
+      context: context,
+      barrierDismissible: false,
+      builder: (d) => AlertDialog(
+        title: const Text('Use Comms on this phone?'),
+        content: const Text(
+          'Your account was set up on another phone, so new messages are being locked for that phone. '
+          'Switch them to this phone? Messages sent to the other phone can only be read there.',
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(d, false), child: const Text('Not now', style: TextStyle(color: AppColors.textMuted))),
+          TextButton(onPressed: () => Navigator.pop(d, true), child: const Text('Use this phone')),
+        ],
+      ),
+    );
+    if (useHere == true) await UserService.instance.setPublicKey(widget.uid, mine);
+  }
+
+  /// JACE asked to send a message. Sends straight away when it is clear who it is for,
+  /// otherwise asks which person was meant.
+  Future<void> _handleAssistant(AssistantRequest request) async {
+    final me = _me;
+    if (me == null || !mounted) return;
+    final assistant = AssistantService.instance;
+    final ranked = await assistant.rank(request.name, await assistant.people(me));
+    if (!mounted) return;
+    if (ranked.isEmpty) {
+      showSnack(context, 'JACE: you have no one to message on Comms yet', error: true);
+      return;
+    }
+    UserModel? to;
+    if (AssistantService.isSure(ranked)) {
+      to = ranked.first.user;
+    } else {
+      to = await _askWho(request, ranked.take(6).toList());
+      if (to == null) return;
+      await assistant.learn(request.name, to.uid);
+    }
+    await _sendFor(me, to, request.text);
+  }
+
+  Future<void> _sendFor(UserModel me, UserModel to, String text) async {
+    try {
+      final room = await ChatService.instance.getOrCreateDirectChat(me.uid, to.uid);
+      if (text.isNotEmpty) {
+        await ChatService.instance.sendMessage(room: room, sender: me, text: text);
+      }
+      _openChat(room);
+      if (mounted && text.isNotEmpty) showSnack(context, 'JACE sent your message to ${to.name}');
+    } on RateLimitException catch (e) {
+      if (mounted) showSnack(context, e.message, error: true);
+    } catch (_) {
+      if (mounted) showSnack(context, 'Could not send. Check your connection.', error: true);
+    }
+  }
+
+  Future<UserModel?> _askWho(AssistantRequest request, List<NameMatch> options) {
+    return showModalBottomSheet<UserModel>(
+      context: context,
+      isScrollControlled: true,
+      builder: (sheet) => SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(20, 4, 20, 12),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text('Who did you mean?', style: AppTheme.display(20, weight: FontWeight.w700)),
+              const SizedBox(height: 4),
+              Text(
+                'JACE heard "${request.name}". Pick the person and Comms will remember next time.',
+                style: AppTheme.body(13.5, color: AppColors.textMuted),
+              ),
+              if (request.text.isNotEmpty) ...[
+                const SizedBox(height: 12),
+                Container(
+                  width: double.infinity,
+                  padding: const EdgeInsets.all(12),
+                  decoration: BoxDecoration(color: AppColors.bgAlt, borderRadius: BorderRadius.circular(14)),
+                  child: Text('"${request.text}"', style: AppTheme.body(14.5)),
+                ),
+              ],
+              const SizedBox(height: 8),
+              for (final option in options)
+                ListTile(
+                  contentPadding: EdgeInsets.zero,
+                  leading: Avatar(name: option.user.name, photoUrl: option.user.photoUrl, size: 42),
+                  title: Text(option.user.name),
+                  subtitle: Text(option.user.email, maxLines: 1, overflow: TextOverflow.ellipsis),
+                  trailing: const Icon(Icons.send_rounded, color: AppColors.primary),
+                  onTap: () => Navigator.pop(sheet, option.user),
+                ),
+            ],
+          ),
+        ),
+      ),
+    );
   }
 
   Future<void> _offerUpdate() async {
@@ -130,13 +271,20 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     }
   }
 
+  /// A nickname was changed: show it straight away.
+  void _namesChanged() {
+    if (mounted) setState(() {});
+  }
+
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
     _calls.removeListener(_onCallChange);
+    Nicknames.instance.removeListener(_namesChanged);
     _meSub?.cancel();
     _incomingSub?.cancel();
     _tapSub?.cancel();
+    _assistantSub?.cancel();
     super.dispose();
   }
 

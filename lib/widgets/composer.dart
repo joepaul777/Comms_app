@@ -9,6 +9,7 @@ import '../models/message_model.dart';
 import '../theme/app_colors.dart';
 import '../theme/app_theme.dart';
 import 'ui.dart';
+import '../services/local_prefs.dart';
 
 /// The bar at the bottom of a chat: text, attachments and voice messages.
 class Composer extends StatefulWidget {
@@ -356,7 +357,7 @@ class _ReplyBanner extends StatelessWidget {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Text(editing ? 'Editing message' : 'Replying to ${message.senderName}', style: AppTheme.body(12.5, weight: FontWeight.w600, color: AppColors.primary)),
+                Text(editing ? 'Editing message' : 'Replying to ${Nicknames.instance.name(message.senderId, message.senderName)}', style: AppTheme.body(12.5, weight: FontWeight.w600, color: AppColors.primary)),
                 Text(
                   message.type == MessageType.text ? message.text : _label(message.type),
                   maxLines: 1,

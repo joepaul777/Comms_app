@@ -5,6 +5,7 @@ import 'package:image_cropper/image_cropper.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:package_info_plus/package_info_plus.dart';
 import '../../models/user_model.dart';
+import '../../services/app_lock.dart';
 import '../../services/auth_service.dart';
 import '../../services/update_service.dart';
 import '../../services/user_service.dart';
@@ -27,12 +28,16 @@ class _ProfileScreenState extends State<ProfileScreen> {
   late final Stream<UserModel?> _meStream = UserService.instance.userStream(widget.me.uid);
   PackageInfo? _info;
   bool _checking = false;
+  bool _updateWaiting = false;
 
   @override
   void initState() {
     super.initState();
     UpdateService.current().then((i) {
       if (mounted) setState(() => _info = i);
+    });
+    UpdateService.newerRelease().then((r) {
+      if (mounted && r != null) setState(() => _updateWaiting = true);
     });
   }
 
@@ -96,6 +101,15 @@ class _ProfileScreenState extends State<ProfileScreen> {
     }
   }
 
+  Future<void> _toggleLock(bool on) async {
+    if (on && !await AppLock.instance.available()) {
+      if (mounted) showSnack(context, 'Set a screen lock on your phone first (Settings > Security)', error: true);
+      return;
+    }
+    final done = await AppLock.instance.setEnabled(on);
+    if (done && mounted) showSnack(context, on ? 'Comms will ask for your fingerprint or screen lock' : 'App lock is off');
+  }
+
   Future<void> _signOut() async {
     final ok = await showDialog<bool>(
       context: context,
@@ -123,7 +137,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
           return ListView(
             padding: const EdgeInsets.only(bottom: 120),
             children: [
-              const PageHeader(title: 'You'),
+              const PageHeader(title: 'Settings'),
               Center(
                 child: ConstrainedBox(
                   constraints: const BoxConstraints(maxWidth: 560),
@@ -154,8 +168,45 @@ class _ProfileScreenState extends State<ProfileScreen> {
                         Text(me.email, style: AppTheme.body(14, color: AppColors.textMuted)),
                         const SizedBox(height: 24),
                         _Group(children: [
+                          _Row(
+                            icon: Icons.system_update_rounded,
+                            title: 'Check for updates',
+                            value: _info == null ? '' : 'Version ${_info!.version}',
+                            trailing: _checking
+                                ? const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2))
+                                : _updateWaiting
+                                    ? Container(
+                                        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                                        decoration: BoxDecoration(color: AppColors.primary, borderRadius: BorderRadius.circular(12)),
+                                        child: Text('Update available', style: AppTheme.body(11.5, weight: FontWeight.w700, color: AppColors.textDark)),
+                                      )
+                                    : null,
+                            onTap: _checking ? null : _checkUpdates,
+                          ),
+                        ]),
+                        const SizedBox(height: 14),
+                        _Group(children: [
                           _Row(icon: Icons.badge_rounded, title: 'Name', value: me.name, onTap: () => _editName(me.name)),
                           _Row(icon: Icons.photo_camera_back_rounded, title: 'Profile photo', value: 'Change', onTap: _changePhoto),
+                        ]),
+                        const SizedBox(height: 14),
+                        _Group(children: [
+                          ListenableBuilder(
+                            listenable: AppLock.instance,
+                            builder: (context, _) => _Row(
+                              icon: Icons.fingerprint_rounded,
+                              title: 'App lock',
+                              value: 'Fingerprint or screen lock',
+                              trailing: Switch(value: AppLock.instance.enabled, onChanged: _toggleLock),
+                              onTap: () => _toggleLock(!AppLock.instance.enabled),
+                            ),
+                          ),
+                          const _Row(
+                            icon: Icons.lock_rounded,
+                            title: 'End-to-end encrypted',
+                            value: 'Only your chats can read them',
+                            trailing: SizedBox.shrink(),
+                          ),
                         ]),
                         const SizedBox(height: 14),
                         _Group(children: [
@@ -164,16 +215,6 @@ class _ProfileScreenState extends State<ProfileScreen> {
                             title: 'Nearby chat',
                             value: 'No internet needed',
                             onTap: () => Navigator.of(context).push(MaterialPageRoute(builder: (_) => const OfflineLobbyScreen())),
-                          ),
-                        ]),
-                        const SizedBox(height: 14),
-                        _Group(children: [
-                          _Row(
-                            icon: Icons.system_update_rounded,
-                            title: 'Check for updates',
-                            value: _info == null ? '' : 'Version ${_info!.version}',
-                            trailing: _checking ? const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2)) : null,
-                            onTap: _checking ? null : _checkUpdates,
                           ),
                         ]),
                         const SizedBox(height: 14),

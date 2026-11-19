@@ -8,6 +8,7 @@ import '../../theme/app_colors.dart';
 import '../../theme/app_theme.dart';
 import '../../widgets/avatar.dart';
 import '../../widgets/ui.dart';
+import '../../services/local_prefs.dart';
 
 class CallHistoryScreen extends StatefulWidget {
   final UserModel me;
@@ -102,10 +103,10 @@ class _CallHistoryScreenState extends State<CallHistoryScreen> {
       color = AppColors.incoming;
       detail = c.status == CallStatus.rejected ? 'Declined' : (c.duration != null ? formatDuration(Duration(seconds: c.duration!)) : 'Incoming');
     }
-    final name = c.otherName(widget.me.uid);
+    final name = Nicknames.instance.name(c.otherId(widget.me.uid), c.otherName(widget.me.uid));
     return ListTile(
       contentPadding: const EdgeInsets.symmetric(horizontal: 20, vertical: 2),
-      leading: Avatar(name: name, photoUrl: c.otherPhoto(widget.me.uid), size: 48),
+      leading: PersonAvatar(uid: c.otherId(widget.me.uid), name: name, fallbackPhoto: c.otherPhoto(widget.me.uid), size: 48),
       title: Text(name, style: AppTheme.body(15.5, weight: FontWeight.w600, color: missed ? AppColors.missed : AppColors.text)),
       subtitle: Row(
         children: [
