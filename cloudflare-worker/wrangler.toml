@@ -9,7 +9,7 @@ METERED_DOMAIN = "joepaul.metered.live"
 
 # The newest Comms release. Raise LATEST_BUILD (it must match the "+number" in
 # pubspec.yaml) and redeploy, and every phone on an older build is offered the update.
-LATEST_VERSION = "2.2.0"
-LATEST_BUILD = "5006"
+LATEST_VERSION = "2.2.1"
+LATEST_BUILD = "5007"
 DOWNLOAD_URL = "https://joepaul.vercel.app/downloads/Comms.apk"
-RELEASE_NOTES = "Comms is now on the web! Open jp-comms.web.app on any computer, sign in, and link it to this phone to read and send your encrypted messages there. This update lets your phone approve that link."
+RELEASE_NOTES = "Small fixes: the reply and reaction menu now opens right next to the message, and Comms Web (jp-comms.web.app) sends with Enter."
