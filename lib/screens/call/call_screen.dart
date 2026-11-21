@@ -136,6 +136,10 @@ class _CallScreenState extends State<CallScreen> with TickerProviderStateMixin {
                               Text(name, style: AppTheme.display(30), textAlign: TextAlign.center),
                               const SizedBox(height: 8),
                               _statusText(),
+                              if (_calls.mediaNote != null && _calls.phase != CallPhase.ended) ...[
+                                const SizedBox(height: 10),
+                                Text(_calls.mediaNote!, textAlign: TextAlign.center, style: AppTheme.body(13, color: AppColors.error)),
+                              ],
                             ],
                           ),
                         ),
@@ -177,16 +181,22 @@ class _CallScreenState extends State<CallScreen> with TickerProviderStateMixin {
                             (_pipOffset.dy + d.delta.dy).clamp(8, box.maxHeight * 0.55),
                           );
                         }),
-                        child: Container(
-                          width: (box.maxWidth * 0.28).clamp(96, 200),
-                          height: (box.maxWidth * 0.28).clamp(96, 200) * 4 / 3,
+                        // Just the picture with rounded corners and a soft shadow: no
+                        // coloured frame that could peek out around the video.
+                        child: DecoratedBox(
                           decoration: BoxDecoration(
                             borderRadius: BorderRadius.circular(18),
-                            border: Border.all(color: AppColors.primary.withValues(alpha: 0.6), width: 1.5),
                             boxShadow: const [BoxShadow(color: Colors.black54, blurRadius: 18)],
                           ),
-                          clipBehavior: Clip.antiAlias,
-                          child: RTCVideoView(_local, mirror: true, objectFit: RTCVideoViewObjectFit.RTCVideoViewObjectFitCover),
+                          child: ClipRRect(
+                            borderRadius: BorderRadius.circular(18),
+                            child: Container(
+                              color: Colors.black,
+                              width: (box.maxWidth * 0.28).clamp(96, 200),
+                              height: (box.maxWidth * 0.28).clamp(96, 200) * 4 / 3,
+                              child: RTCVideoView(_local, mirror: true, objectFit: RTCVideoViewObjectFit.RTCVideoViewObjectFitCover),
+                            ),
+                          ),
                         ),
                       ),
                     ),

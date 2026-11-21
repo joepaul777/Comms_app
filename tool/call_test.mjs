@@ -1,0 +1,258 @@
+// End-to-end call tests for the web app, between real headless Chrome windows with
+// fake cameras and microphones, against the local Firebase emulators.
+//
+//   1. firebase emulators:start --only auth,firestore --project demo-comms
+//   2. flutter build web -t tool/call_test_main.dart -o build/web_calltest
+//   3. serve build/web_calltest on http://127.0.0.1:8770 (any static server)
+//   4. node tool/call_test.mjs
+import { spawn } from 'node:child_process';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+
+const CHROME = process.env.CHROME || 'C:/Program Files/Google/Chrome/Application/chrome.exe';
+const APP = process.env.APP || 'http://127.0.0.1:8770/';
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+const browsers = [];
+
+async function openDevice(name, port, { noCamera = false } = {}) {
+  const profile = mkdtempSync(join(tmpdir(), `comms-${name}-`));
+  const proc = spawn(CHROME, [
+    '--headless=new', '--no-first-run', '--no-default-browser-check', `--user-data-dir=${profile}`,
+    `--remote-debugging-port=${port}`, '--window-size=1200,800',
+    '--use-fake-device-for-media-stream', '--use-fake-ui-for-media-stream',
+    '--autoplay-policy=no-user-gesture-required', '--disable-features=WebRtcHideLocalIpsWithMdns',
+    'about:blank',
+  ], { stdio: 'ignore' });
+  browsers.push({ proc, profile });
+  let target;
+  for (let i = 0; i < 50 && !target; i++) {
+    await sleep(200);
+    try {
+      target = (await (await fetch(`http://127.0.0.1:${port}/json`)).json()).find(t => t.type === 'page');
+    } catch {}
+  }
+  const ws = new WebSocket(target.webSocketDebuggerUrl);
+  await new Promise(r => ws.addEventListener('open', r));
+  let id = 0;
+  const pending = new Map();
+  const errors = [];
+  ws.addEventListener('message', ev => {
+    const m = JSON.parse(ev.data);
+    if (m.id && pending.has(m.id)) { pending.get(m.id)(m); pending.delete(m.id); }
+    if (m.method === 'Runtime.exceptionThrown') errors.push(m.params.exceptionDetails.exception?.description?.split('\n')[0]);
+    if (m.method === 'Runtime.consoleAPICalled' && /fail|error/i.test(JSON.stringify(m.params.args))) {
+      errors.push(m.params.args.map(a => a.value ?? '').join(' ').slice(0, 200));
+    }
+  });
+  const send = (method, params = {}) => new Promise(r => { const i = ++id; pending.set(i, r); ws.send(JSON.stringify({ id: i, method, params })); });
+  await send('Runtime.enable');
+  await send('Page.enable');
+  if (noCamera) {
+    // Like a computer without a webcam: asking for the camera fails, the microphone works.
+    await send('Page.addScriptToEvaluateOnNewDocument', { source: `
+      const real = navigator.mediaDevices.getUserMedia.bind(navigator.mediaDevices);
+      navigator.mediaDevices.getUserMedia = c => c && c.video ? Promise.reject(new DOMException('Requested device not found', 'NotFoundError')) : real(c);` });
+  }
+  await send('Page.navigate', { url: APP });
+  const run = async expression => {
+    // Dart errors arrive boxed; unwrap them so the message is readable.
+    const wrapped = `(async () => { try { return await (${expression}); } catch (e) { const x = e?.error ?? e; throw new Error(x?.message ?? x?.code ?? (typeof x === "object" ? JSON.stringify(x, Object.getOwnPropertyNames(x)) : String(x))); } })()`;
+    const res = await send('Runtime.evaluate', { expression: wrapped, awaitPromise: true, returnByValue: true });
+    if (res.result.exceptionDetails) throw new Error(`${name}: ${res.result.exceptionDetails.exception?.description ?? res.result.exceptionDetails.text}`);
+    return res.result.result.value;
+  };
+  for (let i = 0; i < 450; i++) {
+    if (await run('typeof window.commsSignIn === "function"').catch(() => false)) break;
+    await sleep(200);
+  }
+  const device = {
+    name, errors,
+    run,
+    state: async () => JSON.parse(await run('commsState()')),
+    async signIn(uid) {
+      const r = await run(`commsSignIn(${JSON.stringify(uid)})`);
+      if (r.startsWith('error')) throw new Error(`${name} sign-in: ${r}`);
+      return r;
+    },
+    call: (uid, video) => run(`commsCall(${JSON.stringify(uid)}, ${video})`),
+    accept: () => run('commsAccept()'),
+    decline: () => run('commsDecline()'),
+    hangUp: () => run('commsHangUp()'),
+    async waitFor(test, what, ms = 20000) {
+      const until = Date.now() + ms;
+      let s;
+      while (Date.now() < until) {
+        s = await this.state();
+        if (test(s)) return s;
+        await sleep(250);
+      }
+      throw new Error(`${name} never got to "${what}"; last state ${JSON.stringify(s)}`);
+    },
+  };
+  return device;
+}
+
+const results = [];
+async function test(name, body) {
+  if (process.env.ONLY && !process.env.ONLY.split("|").some(o => name.includes(o))) return;
+  const start = Date.now();
+  try {
+    await body();
+    results.push(`ok   ${name} (${((Date.now() - start) / 1000).toFixed(1)}s)`);
+  } catch (e) {
+    results.push(`FAIL ${name}: ${e.message}`);
+  }
+  console.log(results.at(-1));
+}
+
+const phase = p => s => s.phase === p;
+const idle = s => s.phase === 'idle';
+const connectedWith = kinds => s => s.phase === 'connected' && kinds.every(k => (s.remote || []).includes(k));
+
+try {
+  const alice = await openDevice('alice', 9401);
+  const bob = await openDevice('bob', 9402);
+  const carolPhone = await openDevice('carol-1', 9403);
+  const carolPc = await openDevice('carol-2', 9404);
+  const dave = await openDevice('dave', 9405, { noCamera: true });
+  // Chrome's fake test camera can only be opened once per browser, so the no-camera
+  // test talks to someone whose camera hasn't been used yet. (Real cameras are fine.)
+  const erin = await openDevice('erin', 9406);
+  const all = [alice, bob, carolPhone, carolPc, dave, erin];
+  // The sign-in emulator makes up each account's id, so calls use the ids it hands back.
+  const uid = {
+    alice: await alice.signIn('alice'),
+    bob: await bob.signIn('bob'),
+    carol: await carolPhone.signIn('carol'),
+    dave: await dave.signIn('dave'),
+    erin: await erin.signIn('erin'),
+  };
+  if ((await carolPc.signIn('carol')) !== uid.carol) throw new Error('carol got two different accounts');
+  await sleep(6000); // home screens load and start listening for calls
+
+  await test('voice call: rings, is answered, both hear each other, hang-up reaches the other side', async () => {
+    { const r = await alice.call(uid.bob, false); if (r !== 'ok') throw new Error('could not start: ' + r); }
+    await bob.waitFor(phase('incoming'), 'ringing');
+    await bob.accept();
+    await alice.waitFor(connectedWith(['audio']), 'connected with audio');
+    await bob.waitFor(connectedWith(['audio']), 'connected with audio');
+    await sleep(3000);
+    await alice.waitFor(phase('connected'), 'still connected');
+    await alice.hangUp();
+    const b = await bob.waitFor(s => s.phase === 'ended' || idle(s), 'call ended');
+    if (b.phase === 'ended' && b.message !== 'Call ended') throw new Error(`bob saw "${b.message}"`);
+    await bob.waitFor(idle, 'closed');
+    await alice.waitFor(idle, 'closed');
+  });
+
+  await test('video call: both sides get the other person\'s video and sound', async () => {
+    await sleep(11000); // calls are spaced out (spam limit)
+    { const r = await bob.call(uid.alice, true); if (r !== 'ok') throw new Error('could not start: ' + r); }
+    await alice.waitFor(phase('incoming'), 'ringing');
+    await alice.accept();
+    await alice.waitFor(connectedWith(['audio', 'video']), 'connected with video');
+    await bob.waitFor(connectedWith(['audio', 'video']), 'connected with video');
+    await bob.hangUp();
+    await alice.waitFor(idle, 'closed');
+    await bob.waitFor(idle, 'closed');
+  });
+
+  await test('declining shows "Declined" to the caller', async () => {
+    await sleep(11000);
+    await alice.call(uid.bob, true);
+    await bob.waitFor(phase('incoming'), 'ringing');
+    await bob.decline();
+    const a = await alice.waitFor(s => s.phase === 'ended', 'ended');
+    if (a.message !== 'Declined') throw new Error(`alice saw "${a.message}"`);
+    await alice.waitFor(idle, 'closed');
+  });
+
+  await test('caller cancels: the other side stops ringing', async () => {
+    await sleep(11000);
+    await bob.call(uid.alice, false);
+    await alice.waitFor(phase('incoming'), 'ringing');
+    await bob.hangUp();
+    const a = await alice.waitFor(s => s.phase === 'ended' || idle(s), 'stopped ringing');
+    if (a.phase === 'ended' && a.message !== 'Missed call') throw new Error(`alice saw "${a.message}"`);
+  });
+
+  await test('same account on two devices: both ring, answering on one stops the other, and the call survives', async () => {
+    await sleep(11000);
+    await alice.call(uid.carol, false);
+    await carolPhone.waitFor(phase('incoming'), 'ringing (device 1)');
+    await carolPc.waitFor(phase('incoming'), 'ringing (device 2)');
+    await carolPhone.accept();
+    const other = await carolPc.waitFor(s => s.phase === 'ended' || idle(s), 'stop ringing');
+    if (other.phase === 'ended' && other.message !== 'Answered on another device') throw new Error(`device 2 saw "${other.message}"`);
+    await alice.waitFor(connectedWith(['audio']), 'connected');
+    await carolPhone.waitFor(connectedWith(['audio']), 'connected');
+    // Past the ring timeout: nothing on device 2 may end the call.
+    await sleep(46000);
+    await alice.waitFor(phase('connected'), 'still connected after the ring timeout', 2000);
+    await carolPhone.waitFor(phase('connected'), 'still connected after the ring timeout', 2000);
+    await carolPhone.hangUp();
+    await alice.waitFor(idle, 'closed');
+  });
+
+  await test('same account on two devices: declining on one stops both and the caller sees "Declined"', async () => {
+    await sleep(11000);
+    await bob.call(uid.carol, true);
+    await carolPhone.waitFor(phase('incoming'), 'ringing (device 1)');
+    await carolPc.waitFor(phase('incoming'), 'ringing (device 2)');
+    await carolPc.decline();
+    const first = await carolPhone.waitFor(s => s.phase === 'ended' || idle(s), 'stop ringing');
+    if (first.phase === 'ended' && first.message !== 'Declined') throw new Error(`device 1 saw "${first.message}"`);
+    const b = await bob.waitFor(s => s.phase === 'ended', 'ended');
+    if (b.message !== 'Declined') throw new Error(`bob saw "${b.message}"`);
+  });
+
+  await test('no camera: a video call still connects, with voice one way and video the other', async () => {
+    await sleep(2000);
+    { const r = await dave.call(uid.erin, true); if (r !== 'ok') throw new Error('could not start: ' + r); }
+    await erin.waitFor(phase('incoming'), 'ringing');
+    await erin.accept();
+    try {
+      await dave.waitFor(connectedWith(['audio', 'video']), 'seeing and hearing erin');
+    } catch (e) {
+      throw new Error(`${e.message}; erin was ${JSON.stringify(await erin.state())}`);
+    }
+    const a = await erin.waitFor(connectedWith(['audio']), 'hearing dave');
+    if ((a.remote || []).includes('video')) throw new Error('erin got video from a device without a camera');
+    const d = await dave.state();
+    if (!(d.local || []).includes('audio') || (d.local || []).includes('video')) throw new Error(`dave sent ${JSON.stringify(d.local)}`);
+    await dave.hangUp();
+    await erin.waitFor(idle, 'closed');
+  });
+
+  if (process.env.PROBE) {
+    const probe = `(async () => {
+      const devices = (await navigator.mediaDevices.enumerateDevices()).map(d => d.kind + ':' + (d.label || '?')).join(', ');
+      let video;
+      try { const s = await navigator.mediaDevices.getUserMedia({ video: true }); video = 'ok ' + s.getVideoTracks()[0].label; s.getTracks().forEach(t => t.stop()); }
+      catch (e) { video = e.name + ' ' + e.message; }
+      let exact;
+      try { const s = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'user', width: 1280, height: 720, frameRate: 30 } }); exact = 'ok'; s.getTracks().forEach(t => t.stop()); }
+      catch (e) { exact = e.name + ' ' + e.message; }
+      return JSON.stringify({ devices, video, exact });
+    })()`;
+    for (const d of [alice, bob, dave]) console.log('probe', d.name, await d.run(probe));
+  }
+
+  const errors = all.flatMap(d => d.errors.map(e => `${d.name}: ${e}`));
+  if (errors.length) console.log('\nconsole errors:\n' + [...new Set(errors)].join('\n'));
+} catch (e) {
+  results.push(`FAIL setup: ${e.message}`);
+  console.log(results.at(-1));
+} finally {
+  for (const b of browsers) {
+    b.proc.kill();
+  }
+  await sleep(1000);
+  for (const b of browsers) {
+    try { rmSync(b.profile, { recursive: true, force: true }); } catch {}
+  }
+  const failed = results.filter(r => r.startsWith('FAIL')).length;
+  console.log(`\n${results.length - failed} of ${results.length} passed`);
+  process.exit(failed ? 1 : 0);
+}

@@ -64,6 +64,9 @@ class CallService extends ChangeNotifier {
   bool cameraOff = false;
   DateTime? connectedAt;
 
+  /// Shown on the call screen when this device's microphone or camera couldn't be used.
+  String? mediaNote;
+
   RTCPeerConnection? _pc;
   StreamSubscription? _callSub;
   StreamSubscription? _candidateSub;
@@ -75,6 +78,9 @@ class CallService extends ChangeNotifier {
   final List<RTCIceCandidate> _pendingCandidates = [];
   bool _finishing = false;
   bool _ringing = false;
+
+  /// Goes up with every call, so work started for an old call can tell it is too late.
+  int _session = 0;
 
   // ---------------------------------------------------------------------------
   // Placing a call
@@ -333,9 +339,20 @@ class CallService extends ChangeNotifier {
         }
       }
 
+      // The same account can be signed in on a phone and in a browser, and both ring.
+      // Once one of them answers or declines, the other one stops.
+      if (phase == CallPhase.incoming && !isCaller && (latest.status == CallStatus.connected || latest.answer != null)) {
+        _endLocally('Answered on another device', elsewhere: true);
+        return;
+      }
+
       if (latest.isOver && phase != CallPhase.ended) {
-        final iEnded = latest.endedBy == myUid;
-        if (!iEnded) _onRemoteEnded(latest);
+        if (latest.endedBy != myUid) {
+          _onRemoteEnded(latest);
+        } else {
+          // Ended by this person on their other device.
+          _endLocally(latest.status == CallStatus.rejected ? 'Declined' : 'Call ended', elsewhere: true);
+        }
       }
     });
   }
@@ -378,15 +395,67 @@ class CallService extends ChangeNotifier {
     return statuses.values.every((s) => s.isGranted);
   }
 
+  /// The microphone and camera, settling for less when something is missing: a
+  /// computer without a webcam still joins a video call with its voice, and one whose
+  /// microphone is blocked still hears the other person.
+  Future<MediaStream?> _getMedia(bool video) async {
+    const audio = {'echoCancellation': true, 'noiseSuppression': true, 'autoGainControl': true};
+    final attempts = <Map<String, dynamic>>[
+      {'audio': audio, 'video': video ? {'facingMode': 'user', 'width': 1280, 'height': 720, 'frameRate': 30} : false},
+      if (video) {'audio': audio, 'video': true},
+      if (video) {'audio': audio, 'video': false},
+      {'audio': true, 'video': false},
+      if (video) {'audio': false, 'video': true},
+    ];
+    Object? problem;
+    for (final constraints in attempts) {
+      try {
+        return await navigator.mediaDevices.getUserMedia(constraints);
+      } catch (e) {
+        problem = e;
+      }
+    }
+    debugPrint('no microphone or camera: $problem');
+    return null;
+  }
+
   Future<void> _openConnection(bool video) async {
+    final session = _session;
     final servers = await PushApi.iceServers();
-    _pc = await createPeerConnection({'iceServers': servers, 'sdpSemantics': 'unified-plan'});
-    localStream = await navigator.mediaDevices.getUserMedia({
-      'audio': {'echoCancellation': true, 'noiseSuppression': true, 'autoGainControl': true},
-      'video': video ? {'facingMode': 'user', 'width': 1280, 'height': 720, 'frameRate': 30} : false,
-    });
-    for (final track in localStream!.getTracks()) {
+    final pc = await createPeerConnection({'iceServers': servers, 'sdpSemantics': 'unified-plan'});
+    final stream = await _getMedia(video);
+    // The call was declined or cancelled while the camera was starting: let go of it
+    // straight away, or it stays on and the next call can't use it.
+    if (session != _session || phase == CallPhase.ended || phase == CallPhase.idle) {
+      for (final t in stream?.getTracks() ?? const <MediaStreamTrack>[]) {
+        await t.stop();
+      }
+      await stream?.dispose();
+      await pc.close();
+      throw StateError('call ended while starting');
+    }
+    _pc = pc;
+    localStream = stream;
+    final tracks = localStream?.getTracks() ?? const <MediaStreamTrack>[];
+    for (final track in tracks) {
       await _pc!.addTrack(track, localStream!);
+    }
+    final hasAudio = tracks.any((t) => t.kind == 'audio');
+    final hasVideo = tracks.any((t) => t.kind == 'video');
+    mediaNote = !hasAudio
+        ? (kIsWeb ? 'Your microphone is off or blocked in this browser' : 'Your microphone is not available')
+        : video && !hasVideo
+            ? 'No camera found, so only your voice is sent'
+            : null;
+    // Whoever starts the call still asks to receive what they can't send, so the other
+    // person's voice and video come through.
+    if (isCaller) {
+      if (!hasAudio) {
+        await _pc!.addTransceiver(kind: RTCRtpMediaType.RTCRtpMediaTypeAudio, init: RTCRtpTransceiverInit(direction: TransceiverDirection.RecvOnly));
+      }
+      if (video && !hasVideo) {
+        await _pc!.addTransceiver(kind: RTCRtpMediaType.RTCRtpMediaTypeVideo, init: RTCRtpTransceiverInit(direction: TransceiverDirection.RecvOnly));
+      }
     }
     _pc!.onTrack = (event) {
       if (event.streams.isNotEmpty) {
@@ -431,7 +500,8 @@ class CallService extends ChangeNotifier {
   }
 
   void _sendCandidate(String callId, String side, RTCIceCandidate candidate) {
-    if (candidate.candidate == null) return;
+    // Browsers end the list with an empty candidate; there is nothing to send.
+    if (candidate.candidate == null || candidate.candidate!.isEmpty) return;
     _db.collection('calls').doc(callId).collection(side).add(candidate.toMap()).catchError((e) {
       debugPrint('candidate send failed: $e');
       return _db.collection('calls').doc(callId);
@@ -525,11 +595,13 @@ class CallService extends ChangeNotifier {
     _endLocally(message);
   }
 
-  void _endLocally(String message) {
+  /// [elsewhere]: the call carries on (or ended) on this person's other device, so
+  /// this one must not mark them as free.
+  void _endLocally(String message, {bool elsewhere = false}) {
     endMessage = message;
     phase = CallPhase.ended;
     _stopRinging();
-    unawaited(_releaseMedia());
+    unawaited(_releaseMedia(keepBusy: elsewhere));
     if (call != null) unawaited(NotificationService.instance.cancelCall(call!.id));
     notifyListeners();
     _scheduleClose();
@@ -548,7 +620,7 @@ class CallService extends ChangeNotifier {
     notifyListeners();
   }
 
-  Future<void> _releaseMedia() async {
+  Future<void> _releaseMedia({bool keepBusy = false}) async {
     _ringTimer?.cancel();
     _dropTimer?.cancel();
     _busyTimer?.cancel();
@@ -564,18 +636,20 @@ class CallService extends ChangeNotifier {
     remoteStream = null;
     await _pc?.close();
     _pc = null;
-    if (myUid.isNotEmpty) unawaited(UserService.instance.setBusy(myUid, false));
+    if (myUid.isNotEmpty && !keepBusy) unawaited(UserService.instance.setBusy(myUid, false));
     await _setSpeaker(false);
     await WakelockPlus.disable().catchError((_) {});
   }
 
   void _resetState() {
+    _session++;
     _closeTimer?.cancel();
     endMessage = '';
     muted = false;
     speakerOn = false;
     cameraOff = false;
     connectedAt = null;
+    mediaNote = null;
     _remoteDescriptionSet = false;
     _pendingCandidates.clear();
     _finishing = false;

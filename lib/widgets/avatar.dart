@@ -19,6 +19,17 @@ class Avatar extends StatelessWidget {
     return parts.isNotEmpty ? parts[0][0].toUpperCase() : '?';
   }
 
+  Widget _initialsCircle(Widget child) => Container(
+        width: size,
+        height: size,
+        decoration: BoxDecoration(
+          shape: BoxShape.circle,
+          color: AppColors.primarySoft,
+          border: Border.all(color: AppColors.primary.withValues(alpha: 0.18)),
+        ),
+        child: child,
+      );
+
   @override
   Widget build(BuildContext context) {
     final fallback = Center(
@@ -32,24 +43,24 @@ class Avatar extends StatelessWidget {
       child: Stack(
         clipBehavior: Clip.none,
         children: [
-          Container(
-            width: size,
-            height: size,
-            decoration: BoxDecoration(
-              shape: BoxShape.circle,
-              color: AppColors.primarySoft,
-              border: Border.all(color: AppColors.primary.withValues(alpha: 0.18)),
+          if (photoUrl.isEmpty)
+            _initialsCircle(fallback)
+          else
+            // A photo fills the circle on its own: nothing yellow behind it that could
+            // show at the edge.
+            ClipOval(
+              child: SizedBox(
+                width: size,
+                height: size,
+                child: Image(
+                  // Decode at the size shown, not the full photo.
+                  image: ResizeImage(getImageProvider(photoUrl), width: (size * MediaQuery.devicePixelRatioOf(context)).round(), policy: ResizeImagePolicy.fit),
+                  fit: BoxFit.cover,
+                  frameBuilder: (_, child, frame, sync) => frame == null && !sync ? const ColoredBox(color: AppColors.bgElevated) : child,
+                  errorBuilder: (_, _, _) => _initialsCircle(fallback),
+                ),
+              ),
             ),
-            clipBehavior: Clip.antiAlias,
-            child: photoUrl.isEmpty
-                ? fallback
-                : Image(
-                    // Decode at the size shown, not the full photo.
-                    image: ResizeImage(getImageProvider(photoUrl), width: (size * MediaQuery.devicePixelRatioOf(context)).round(), policy: ResizeImagePolicy.fit),
-                    fit: BoxFit.cover,
-                    errorBuilder: (_, _, _) => fallback,
-                  ),
-          ),
           if (online)
             Positioned(
               right: 0,
