@@ -297,6 +297,67 @@ class _CallScreenState extends State<CallScreen> with TickerProviderStateMixin {
     );
   }
 
+  static IconData _outputIcon(String output) {
+    switch (output) {
+      case 'speaker':
+        return Icons.volume_up_rounded;
+      case 'bluetooth':
+        return Icons.bluetooth_audio_rounded;
+      case 'wired-headset':
+        return Icons.headset_rounded;
+      default:
+        return Icons.phone_in_talk_rounded;
+    }
+  }
+
+  static String _outputName(String output) {
+    switch (output) {
+      case 'speaker':
+        return 'Speaker';
+      case 'bluetooth':
+        return 'Bluetooth';
+      case 'wired-headset':
+        return 'Headphones';
+      default:
+        return 'Phone (in-ear)';
+    }
+  }
+
+  /// With only the earpiece and speaker, a tap switches between them; with a headset
+  /// connected too, it asks which one.
+  Future<void> _chooseOutput() async {
+    final outputs = _calls.audioOutputs;
+    if (outputs.length <= 2) {
+      await _calls.toggleSpeaker();
+      return;
+    }
+    final picked = await showModalBottomSheet<String>(
+      context: context,
+      backgroundColor: AppColors.bgAlt,
+      builder: (sheet) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Padding(
+              padding: const EdgeInsets.fromLTRB(20, 4, 20, 8),
+              child: Text('Play sound through', style: AppTheme.display(18, weight: FontWeight.w700)),
+            ),
+            for (final output in outputs)
+              ListTile(
+                leading: Icon(_outputIcon(output), color: output == _calls.audioOutput ? AppColors.primary : AppColors.text),
+                title: Text(_outputName(output)),
+                trailing: output == _calls.audioOutput ? const Icon(Icons.check_rounded, color: AppColors.primary) : null,
+                onTap: () => Navigator.pop(sheet, output),
+              ),
+            const SizedBox(height: 8),
+          ],
+        ),
+      ),
+    );
+    if (picked != null) await _calls.selectAudioOutput(picked);
+  }
+
   Widget _activeControls(bool video) {
     final ended = _calls.phase == CallPhase.ended;
     return Container(
@@ -319,12 +380,14 @@ class _CallScreenState extends State<CallScreen> with TickerProviderStateMixin {
             ),
             // A computer usually has one camera.
             if (!kIsWeb) _Toggle(icon: Icons.cameraswitch_rounded, active: false, label: 'Flip', onTap: ended ? null : _calls.switchCamera),
-          ] else if (!kIsWeb)
+          ],
+          // Speaker, earpiece, wired headset or Bluetooth (a computer uses its own setting).
+          if (!kIsWeb)
             _Toggle(
-              icon: _calls.speakerOn ? Icons.volume_up_rounded : Icons.hearing_rounded,
-              active: _calls.speakerOn,
-              label: 'Speaker',
-              onTap: ended ? null : _calls.toggleSpeaker,
+              icon: _outputIcon(_calls.audioOutput),
+              active: _calls.audioOutput != 'earpiece',
+              label: 'Sound: ${_outputName(_calls.audioOutput)}',
+              onTap: ended ? null : _chooseOutput,
             ),
           TapScale(
             onTap: ended ? null : _calls.hangUp,

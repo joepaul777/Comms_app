@@ -392,6 +392,11 @@ class CallService extends ChangeNotifier {
     // The browser asks for the microphone and camera itself when the call starts.
     if (kIsWeb) return true;
     final statuses = await [Permission.microphone, if (video) Permission.camera].request();
+    // Lets the call use Bluetooth headphones (Android 12+). Optional: without it the
+    // call just can't switch to them.
+    try {
+      await Permission.bluetoothConnect.request();
+    } catch (_) {}
     return statuses.values.every((s) => s.isGranted);
   }
 
@@ -464,8 +469,7 @@ class CallService extends ChangeNotifier {
       }
     };
     _pc!.onIceConnectionState = _onIceState;
-    speakerOn = video;
-    await _setSpeaker(speakerOn);
+    await _setUpAudio(video);
     await WakelockPlus.enable().catchError((_) {});
     notifyListeners();
   }
@@ -544,9 +548,75 @@ class CallService extends ChangeNotifier {
     notifyListeners();
   }
 
-  Future<void> toggleSpeaker() async {
-    speakerOn = !speakerOn;
-    await _setSpeaker(speakerOn);
+  Future<void> toggleSpeaker() => selectAudioOutput(audioOutput == 'speaker' ? _phoneOutput() : 'speaker');
+
+  // ---------------------------------------------------------------------------
+  // Where the sound goes (phones)
+  // ---------------------------------------------------------------------------
+
+  /// The ways sound can come out, in the order shown: 'earpiece', 'speaker',
+  /// 'wired-headset', 'bluetooth'. Only those this phone has right now.
+  List<String> audioOutputs = const [];
+
+  /// The one in use.
+  String audioOutput = 'earpiece';
+
+  static const _outputOrder = ['earpiece', 'speaker', 'wired-headset', 'bluetooth'];
+
+  /// What to use when nothing else is chosen: a headset if one is connected,
+  /// otherwise the earpiece (or the speaker when there is none).
+  String _phoneOutput() {
+    if (audioOutputs.contains('bluetooth')) return 'bluetooth';
+    if (audioOutputs.contains('wired-headset')) return 'wired-headset';
+    return audioOutputs.contains('earpiece') ? 'earpiece' : 'speaker';
+  }
+
+  Future<void> _refreshOutputs() async {
+    try {
+      final ids = (await Helper.audiooutputs).map((d) => d.deviceId).toSet();
+      audioOutputs = _outputOrder.where(ids.contains).toList();
+    } catch (e) {
+      debugPrint('audio outputs failed: $e');
+    }
+    if (audioOutputs.isEmpty) audioOutputs = const ['earpiece', 'speaker'];
+  }
+
+  /// Like a phone call: a headset if one is connected, otherwise the speaker for
+  /// video calls and the earpiece for voice calls.
+  Future<void> _setUpAudio(bool video) async {
+    if (kIsWeb) return;
+    await _refreshOutputs();
+    final headset = _phoneOutput();
+    await selectAudioOutput(headset == 'bluetooth' || headset == 'wired-headset' ? headset : (video ? 'speaker' : headset));
+    navigator.mediaDevices.ondevicechange = (_) => _onDevicesChanged();
+  }
+
+  /// A headset was connected or disconnected during the call.
+  Future<void> _onDevicesChanged() async {
+    if (!isActive || phase == CallPhase.ended || kIsWeb) return;
+    final before = audioOutputs.toSet();
+    await _refreshOutputs();
+    final added = audioOutputs.where((d) => !before.contains(d) && (d == 'bluetooth' || d == 'wired-headset')).toList();
+    if (added.isNotEmpty) {
+      await selectAudioOutput(added.last);
+    } else if (!audioOutputs.contains(audioOutput)) {
+      await selectAudioOutput(call?.isVideo == true ? 'speaker' : _phoneOutput());
+    } else {
+      notifyListeners();
+    }
+  }
+
+  /// Sends the call's sound to [output] (one of [audioOutputs]).
+  Future<void> selectAudioOutput(String output) async {
+    if (kIsWeb) return;
+    try {
+      await Helper.selectAudioOutput(output);
+    } catch (e) {
+      debugPrint('select audio output failed: $e');
+      if (output == 'speaker' || output == 'earpiece') await _setSpeaker(output == 'speaker');
+    }
+    audioOutput = output;
+    speakerOn = output == 'speaker';
     notifyListeners();
   }
 
@@ -637,6 +707,7 @@ class CallService extends ChangeNotifier {
     await _pc?.close();
     _pc = null;
     if (myUid.isNotEmpty && !keepBusy) unawaited(UserService.instance.setBusy(myUid, false));
+    if (!kIsWeb) navigator.mediaDevices.ondevicechange = null;
     await _setSpeaker(false);
     await WakelockPlus.disable().catchError((_) {});
   }
@@ -650,6 +721,8 @@ class CallService extends ChangeNotifier {
     cameraOff = false;
     connectedAt = null;
     mediaNote = null;
+    audioOutput = 'earpiece';
+    audioOutputs = const [];
     _remoteDescriptionSet = false;
     _pendingCandidates.clear();
     _finishing = false;
