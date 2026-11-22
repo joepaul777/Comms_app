@@ -9,7 +9,7 @@ METERED_DOMAIN = "joepaul.metered.live"
 
 # The newest Comms release. Raise LATEST_BUILD (it must match the "+number" in
 # pubspec.yaml) and redeploy, and every phone on an older build is offered the update.
-LATEST_VERSION = "2.2.2"
-LATEST_BUILD = "5008"
+LATEST_VERSION = "2.2.3"
+LATEST_BUILD = "5009"
 DOWNLOAD_URL = "https://joepaul.vercel.app/downloads/Comms.apk"
-RELEASE_NOTES = "Calls are fixed between phones and Comms Web: if you are signed in on both, answering or declining on one now stops the other, and calls connect even without a camera. Profile photos and your video preview no longer have a yellow edge."
+RELEASE_NOTES = "Choose where call sound plays: tap the sound button during a voice or video call to switch between the phone (in-ear), the speaker, headphones and Bluetooth. Calls use your headphones automatically when they are connected."
