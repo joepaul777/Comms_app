@@ -15,11 +15,12 @@ const APP = process.env.APP || 'http://127.0.0.1:8770/';
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 const browsers = [];
 
-async function openDevice(name, port, { noCamera = false } = {}) {
+async function openDevice(name, port, { noCamera = false, size = '1200,800', video } = {}) {
   const profile = mkdtempSync(join(tmpdir(), `comms-${name}-`));
   const proc = spawn(CHROME, [
     '--headless=new', '--no-first-run', '--no-default-browser-check', `--user-data-dir=${profile}`,
-    `--remote-debugging-port=${port}`, '--window-size=1200,800',
+    `--remote-debugging-port=${port}`, `--window-size=${size}`,
+    ...(video ? [`--use-file-for-fake-video-capture=${video}`] : []),
     '--use-fake-device-for-media-stream', '--use-fake-ui-for-media-stream',
     '--autoplay-policy=no-user-gesture-required', '--disable-features=WebRtcHideLocalIpsWithMdns',
     'about:blank',
@@ -69,6 +70,16 @@ async function openDevice(name, port, { noCamera = false } = {}) {
   const device = {
     name, errors,
     run,
+    async screenshot(file) {
+      const shot = await send('Page.captureScreenshot', { format: 'png' });
+      (await import('node:fs')).writeFileSync(file, Buffer.from(shot.result.result?.data ?? shot.result.data, 'base64'));
+    },
+    async drag(from, to) {
+      const move = (type, [x, y]) => send('Input.dispatchMouseEvent', { type, x, y, button: 'left', buttons: type === 'mouseReleased' ? 0 : 1, clickCount: 1 });
+      await move('mousePressed', from);
+      for (let i = 1; i <= 10; i++) await move('mouseMoved', [from[0] + (to[0] - from[0]) * i / 10, from[1] + (to[1] - from[1]) * i / 10]);
+      await move('mouseReleased', to);
+    },
     state: async () => JSON.parse(await run('commsState()')),
     async signIn(uid) {
       const r = await run(`commsSignIn(${JSON.stringify(uid)})`);
@@ -111,6 +122,10 @@ const idle = s => s.phase === 'idle';
 const connectedWith = kinds => s => s.phase === 'connected' && kinds.every(k => (s.remote || []).includes(k));
 
 try {
+  // Start from an empty database and no accounts, so nothing from an earlier run (like
+  // someone still marked as on a call) gets in the way.
+  await fetch('http://127.0.0.1:8080/emulator/v1/projects/demo-comms/databases/(default)/documents', { method: 'DELETE' });
+  await fetch('http://127.0.0.1:9099/emulator/v1/projects/demo-comms/accounts', { method: 'DELETE' });
   const alice = await openDevice('alice', 9401);
   const bob = await openDevice('bob', 9402);
   const carolPhone = await openDevice('carol-1', 9403);
@@ -224,6 +239,41 @@ try {
     await dave.hangUp();
     await erin.waitFor(idle, 'closed');
   });
+
+  // How a video call looks: an upright phone picture on a wide computer screen, the
+  // camera switched off, and your own picture snapping to a corner. Saves screenshots
+  // to $SHOTS when VIDEO (an upright .y4m clip for the "phone" camera) is set.
+  if (process.env.VIDEO && process.env.SHOTS) {
+    await test('video call layout between a phone and a computer', async () => {
+      const shots = process.env.SHOTS;
+      const phone = await openDevice('phone', 9407, { size: '400,860', video: process.env.VIDEO });
+      const pc = await openDevice('pc', 9408, { size: '1280,800', video: process.env.PC_VIDEO });
+      all.push(phone, pc);
+      const phoneId = await phone.signIn('phone');
+      await pc.signIn('pc');
+      await sleep(6000);
+      { const r = await pc.call(phoneId, true); if (r !== 'ok') throw new Error('could not start: ' + r); }
+      await phone.waitFor(phase('incoming'), 'ringing');
+      await phone.accept();
+      await pc.waitFor(connectedWith(['audio', 'video']), 'connected');
+      await phone.waitFor(connectedWith(['audio', 'video']), 'connected');
+      await sleep(4000);
+      console.log('pc state', JSON.stringify(await pc.state()));
+      console.log('phone state', JSON.stringify(await phone.state()));
+      console.log('pc camera', await pc.run(`(async () => (await navigator.mediaDevices.enumerateDevices()).filter(d => d.kind === 'videoinput').map(d => d.label).join(',') || 'none')()`));
+      await pc.screenshot(`${shots}/1-pc-sees-phone.png`);
+      await phone.screenshot(`${shots}/2-phone-sees-pc.png`);
+      // Drag the computer's own picture from the top right towards the bottom left.
+      await pc.drag([1100, 120], [300, 600]);
+      await sleep(1200);
+      await pc.screenshot(`${shots}/3-pc-self-view-moved.png`);
+      await phone.run('commsToggleCamera()');
+      await sleep(3000);
+      await pc.screenshot(`${shots}/4-pc-when-phone-camera-off.png`);
+      await phone.screenshot(`${shots}/5-phone-own-camera-off.png`);
+      await pc.hangUp();
+    });
+  }
 
   if (process.env.PROBE) {
     const probe = `(async () => {

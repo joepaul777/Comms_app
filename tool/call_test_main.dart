@@ -78,6 +78,10 @@ Future<void> main() async {
         await calls.hangUp();
         return 'ok';
       })).toJS);
+  _hook('commsToggleCamera', (() => _guard(() async {
+        calls.toggleCamera();
+        return 'ok';
+      })).toJS);
   _hook('commsState', (() => jsonEncode({
         'phase': calls.phase.name,
         'message': calls.endMessage,

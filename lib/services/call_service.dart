@@ -67,6 +67,10 @@ class CallService extends ChangeNotifier {
   /// Shown on the call screen when this device's microphone or camera couldn't be used.
   String? mediaNote;
 
+  /// The other person switched their camera off (they send no picture, so their photo
+  /// is shown instead of a black screen).
+  bool remoteCameraOff = false;
+
   RTCPeerConnection? _pc;
   StreamSubscription? _callSub;
   StreamSubscription? _candidateSub;
@@ -145,6 +149,9 @@ class CallService extends ChangeNotifier {
     }
 
     _startBusyHeartbeat();
+    // Listen for the answer (or a decline) straight away, not only once the camera and
+    // connection are ready, so a quick "no" is never missed.
+    _watchCall(callId);
     unawaited(PushApi.call(callId));
     _ringTimer = Timer(AppConfig.ringTimeout, () {
       if (phase == CallPhase.outgoing) _finish(status: CallStatus.missed, reason: EndReason.noAnswer, message: 'No answer');
@@ -158,7 +165,6 @@ class CallService extends ChangeNotifier {
       if (phase != CallPhase.outgoing) return null; // hung up while setting up
       await _db.collection('calls').doc(callId).update({'offer': {'sdp': offer.sdp, 'type': offer.type}});
       _listenCandidates(callId, 'receiverCandidates');
-      _watchCall(callId);
     } catch (e) {
       debugPrint('call setup failed: $e');
       await _finish(status: CallStatus.missed, reason: EndReason.failed, message: 'Could not start the call');
@@ -324,6 +330,13 @@ class CallService extends ChangeNotifier {
       final latest = CallModel.fromMap(data);
       call = latest;
 
+      final otherId = isCaller ? latest.receiverId : latest.callerId;
+      final theirCameraOff = (data['videoOff'] as Map?)?[otherId] == true;
+      if (theirCameraOff != remoteCameraOff) {
+        remoteCameraOff = theirCameraOff;
+        notifyListeners();
+      }
+
       if (isCaller && latest.answer != null && !_remoteDescriptionSet && _pc != null) {
         _remoteDescriptionSet = true;
         try {
@@ -437,6 +450,7 @@ class CallService extends ChangeNotifier {
       }
       await stream?.dispose();
       await pc.close();
+      await pc.dispose();
       throw StateError('call ended while starting');
     }
     _pc = pc;
@@ -626,6 +640,14 @@ class CallService extends ChangeNotifier {
       t.enabled = !cameraOff;
     }
     notifyListeners();
+    // A switched-off camera still sends (black) frames, so tell the other side, which
+    // shows this person's photo instead.
+    final current = call;
+    if (current != null && myUid.isNotEmpty) {
+      _db.collection('calls').doc(current.id).update({'videoOff.$myUid': cameraOff}).catchError((e) {
+        debugPrint('camera state not sent: $e');
+      });
+    }
   }
 
   Future<void> switchCamera() async {
@@ -704,11 +726,24 @@ class CallService extends ChangeNotifier {
     await localStream?.dispose();
     localStream = null;
     remoteStream = null;
-    await _pc?.close();
+    // Disposing (not just closing) is what hands the phone's call audio back: until
+    // then Android keeps Bluetooth earbuds in call mode and music stays paused.
+    final pc = _pc;
     _pc = null;
+    try {
+      await pc?.close();
+      await pc?.dispose();
+    } catch (e) {
+      debugPrint('connection dispose failed: $e');
+    }
     if (myUid.isNotEmpty && !keepBusy) unawaited(UserService.instance.setBusy(myUid, false));
-    if (!kIsWeb) navigator.mediaDevices.ondevicechange = null;
-    await _setSpeaker(false);
+    if (!kIsWeb) {
+      navigator.mediaDevices.ondevicechange = null;
+      // Not "speaker off": on Android that picks the earbuds again and keeps them busy.
+      try {
+        await Helper.clearAndroidCommunicationDevice();
+      } catch (_) {}
+    }
     await WakelockPlus.disable().catchError((_) {});
   }
 
@@ -721,6 +756,7 @@ class CallService extends ChangeNotifier {
     cameraOff = false;
     connectedAt = null;
     mediaNote = null;
+    remoteCameraOff = false;
     audioOutput = 'earpiece';
     audioOutputs = const [];
     _remoteDescriptionSet = false;

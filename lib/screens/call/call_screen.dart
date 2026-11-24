@@ -26,7 +26,10 @@ class _CallScreenState extends State<CallScreen> with TickerProviderStateMixin {
   Timer? _clock;
   bool _renderersReady = false;
   bool _controlsVisible = true;
-  Offset _pipOffset = const Offset(16, 16);
+  /// Which corner your own picture sits in (it snaps there after being dragged),
+  /// and where it is while a finger is moving it.
+  Alignment _pipCorner = Alignment.topRight;
+  Offset? _pipDrag;
   bool _popped = false;
 
   @override
@@ -39,6 +42,9 @@ class _CallScreenState extends State<CallScreen> with TickerProviderStateMixin {
     Future.wait([_local.initialize(), _remote.initialize()]).then((_) {
       if (!mounted) return;
       _renderersReady = true;
+      // Redraw when a picture's size or turn changes, so it is fitted the right way.
+      _local.addListener(_redraw);
+      _remote.addListener(_redraw);
       _onChange();
     });
   }
@@ -60,8 +66,14 @@ class _CallScreenState extends State<CallScreen> with TickerProviderStateMixin {
     setState(() {});
   }
 
+  void _redraw() {
+    if (mounted) setState(() {});
+  }
+
   @override
   void dispose() {
+    _local.removeListener(_redraw);
+    _remote.removeListener(_redraw);
     _calls.removeListener(_onChange);
     _clock?.cancel();
     _rings.dispose();
@@ -96,8 +108,15 @@ class _CallScreenState extends State<CallScreen> with TickerProviderStateMixin {
     if (call == null) return const Scaffold(backgroundColor: AppColors.bg);
     final name = Nicknames.instance.name(call.otherId(_calls.myUid), call.otherName(_calls.myUid));
     final photo = call.otherPhoto(_calls.myUid);
-    final videoLive = call.isVideo && _calls.remoteStream != null && _calls.phase == CallPhase.connected;
-    final showLocalVideo = call.isVideo && _calls.localStream != null && !_calls.cameraOff && _calls.phase != CallPhase.ended;
+    final connectedVideo = call.isVideo && _calls.remoteStream != null && _calls.phase == CallPhase.connected;
+    // No picture from them (camera off, or no camera at all): show their photo, not black.
+    final theirCameraOff = connectedVideo && (_calls.remoteCameraOff || (_calls.remoteStream?.getVideoTracks().isEmpty ?? true));
+    final videoLive = connectedVideo && !theirCameraOff;
+    final showLocalVideo = call.isVideo &&
+        _calls.localStream != null &&
+        !_calls.cameraOff &&
+        (_calls.localStream?.getVideoTracks().isNotEmpty ?? false) &&
+        _calls.phase != CallPhase.ended;
 
     return PopScope(
       canPop: _calls.phase == CallPhase.idle || _calls.phase == CallPhase.ended,
@@ -113,7 +132,7 @@ class _CallScreenState extends State<CallScreen> with TickerProviderStateMixin {
                 children: [
                   // Background: the other person's video, or a soft glow.
                   if (videoLive)
-                    RTCVideoView(_remote, objectFit: RTCVideoViewObjectFit.RTCVideoViewObjectFitCover)
+                    RTCVideoView(_remote, objectFit: _remoteFit(Size(box.maxWidth, box.maxHeight)))
                   else
                     const DecoratedBox(
                       decoration: BoxDecoration(
@@ -136,6 +155,17 @@ class _CallScreenState extends State<CallScreen> with TickerProviderStateMixin {
                               Text(name, style: AppTheme.display(30), textAlign: TextAlign.center),
                               const SizedBox(height: 8),
                               _statusText(),
+                              if (theirCameraOff && _calls.phase == CallPhase.connected) ...[
+                                const SizedBox(height: 10),
+                                Row(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    const Icon(Icons.videocam_off_rounded, size: 16, color: AppColors.textMuted),
+                                    const SizedBox(width: 6),
+                                    Text('Camera off', style: AppTheme.body(13, color: AppColors.textMuted)),
+                                  ],
+                                ),
+                              ],
                               if (_calls.mediaNote != null && _calls.phase != CallPhase.ended) ...[
                                 const SizedBox(height: 10),
                                 Text(_calls.mediaNote!, textAlign: TextAlign.center, style: AppTheme.body(13, color: AppColors.error)),
@@ -167,39 +197,8 @@ class _CallScreenState extends State<CallScreen> with TickerProviderStateMixin {
                         ),
                       ),
                     ),
-                  // Your own camera, draggable.
-                  if (showLocalVideo)
-                    AnimatedPositioned(
-                      duration: const Duration(milliseconds: 120),
-                      right: _pipOffset.dx,
-                      top: _pipOffset.dy + MediaQuery.of(context).padding.top + (videoLive ? 64 : 0),
-                      child: GestureDetector(
-                        onPanUpdate: (d) => setState(() {
-                          final w = box.maxWidth * 0.28;
-                          _pipOffset = Offset(
-                            (_pipOffset.dx - d.delta.dx).clamp(8, box.maxWidth - w - 8),
-                            (_pipOffset.dy + d.delta.dy).clamp(8, box.maxHeight * 0.55),
-                          );
-                        }),
-                        // Just the picture with rounded corners and a soft shadow: no
-                        // coloured frame that could peek out around the video.
-                        child: DecoratedBox(
-                          decoration: BoxDecoration(
-                            borderRadius: BorderRadius.circular(18),
-                            boxShadow: const [BoxShadow(color: Colors.black54, blurRadius: 18)],
-                          ),
-                          child: ClipRRect(
-                            borderRadius: BorderRadius.circular(18),
-                            child: Container(
-                              color: Colors.black,
-                              width: (box.maxWidth * 0.28).clamp(96, 200),
-                              height: (box.maxWidth * 0.28).clamp(96, 200) * 4 / 3,
-                              child: RTCVideoView(_local, mirror: true, objectFit: RTCVideoViewObjectFit.RTCVideoViewObjectFitCover),
-                            ),
-                          ),
-                        ),
-                      ),
-                    ),
+                  // Your own camera: drag it anywhere and it settles in the nearest corner.
+                  if (showLocalVideo) _selfView(Size(box.maxWidth, box.maxHeight), videoLive),
                   // Controls
                   Positioned(
                     left: 0,
@@ -226,6 +225,70 @@ class _CallScreenState extends State<CallScreen> with TickerProviderStateMixin {
                 ],
               );
             },
+          ),
+        ),
+      ),
+    );
+  }
+
+  /// Fill the screen when their picture is the same shape as the screen (a phone held
+  /// upright on a phone); otherwise show all of it, so a phone's upright picture isn't
+  /// cut down to a strip on a wide computer screen.
+  RTCVideoViewObjectFit _remoteFit(Size screen) {
+    final v = _remote.value;
+    if (v.width == 0 || v.height == 0) return RTCVideoViewObjectFit.RTCVideoViewObjectFitContain;
+    final theirsUpright = v.aspectRatio < 1;
+    final screenUpright = screen.height >= screen.width;
+    return theirsUpright == screenUpright ? RTCVideoViewObjectFit.RTCVideoViewObjectFitCover : RTCVideoViewObjectFit.RTCVideoViewObjectFitContain;
+  }
+
+  /// Your own picture, the shape your camera sends (upright from a phone, wide from a
+  /// laptop), in one of the four corners.
+  Widget _selfView(Size screen, bool videoLive) {
+    final v = _local.value;
+    final aspect = v.width > 0 && v.height > 0 ? v.aspectRatio : (kIsWeb ? 16 / 9 : 3 / 4);
+    final longSide = (screen.shortestSide * 0.36).clamp(120.0, 260.0);
+    final size = aspect < 1 ? Size(longSide * aspect, longSide) : Size(longSide, longSide / aspect);
+    final pad = MediaQuery.paddingOf(context);
+    const margin = 14.0;
+    final top = pad.top + margin + (videoLive ? 64 : 0);
+    // Above the buttons along the bottom.
+    final bottom = screen.height - size.height - pad.bottom - 128;
+    Offset cornerSpot(Alignment c) => Offset(c.x < 0 ? margin : screen.width - size.width - margin, c.y < 0 ? top : bottom.clamp(top, screen.height));
+    final spot = _pipDrag ?? cornerSpot(_pipCorner);
+
+    return AnimatedPositioned(
+      duration: _pipDrag == null ? const Duration(milliseconds: 260) : Duration.zero,
+      curve: Curves.easeOutCubic,
+      left: spot.dx,
+      top: spot.dy,
+      child: GestureDetector(
+        onPanStart: (_) => setState(() => _pipDrag = spot),
+        onPanUpdate: (d) => setState(() {
+          final next = (_pipDrag ?? spot) + d.delta;
+          _pipDrag = Offset(next.dx.clamp(0, screen.width - size.width), next.dy.clamp(0, screen.height - size.height));
+        }),
+        onPanEnd: (d) => setState(() {
+          // The nearest corner, nudged by a flick in its direction.
+          final at = (_pipDrag ?? spot) + Offset(size.width / 2, size.height / 2) + d.velocity.pixelsPerSecond * 0.15;
+          _pipCorner = Alignment(at.dx < screen.width / 2 ? -1 : 1, at.dy < screen.height / 2 ? -1 : 1);
+          _pipDrag = null;
+        }),
+        // Just the picture with rounded corners and a soft shadow: no coloured frame
+        // that could peek out around the video.
+        child: DecoratedBox(
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(18),
+            boxShadow: const [BoxShadow(color: Colors.black54, blurRadius: 18)],
+          ),
+          child: ClipRRect(
+            borderRadius: BorderRadius.circular(18),
+            child: Container(
+              color: Colors.black,
+              width: size.width,
+              height: size.height,
+              child: RTCVideoView(_local, mirror: true, objectFit: RTCVideoViewObjectFit.RTCVideoViewObjectFitCover),
+            ),
           ),
         ),
       ),
