@@ -12,7 +12,7 @@ VAPID_PUBLIC_KEY = "BFFlmdibS8j3gKojzELdBKQ3nWIwNyaE9ALd57rVqp55hBPTGKmARlfEBwPJ
 
 # The newest Comms release. Raise LATEST_BUILD (it must match the "+number" in
 # pubspec.yaml) and redeploy, and every phone on an older build is offered the update.
-LATEST_VERSION = "2.2.6"
-LATEST_BUILD = "5012"
+LATEST_VERSION = "3.0.0"
+LATEST_BUILD = "5014"
 DOWNLOAD_URL = "https://joepaul.vercel.app/downloads/Comms.apk"
-RELEASE_NOTES = "Video calls can now keep going in a small floating window: go home or press back during a video call. The window is shaped like the other person's screen. Also new: Comms on iPhone (add jp-comms.web.app to the Home Screen), with notifications even when Comms is closed."
+RELEASE_NOTES = "Comms 3.0 brings walkie-talkie: hold a chat to talk and they hear you instantly (turn it on in Settings; it stays quiet when their phone is on silent). In calls you now see when someone mutes, your own picture snaps into the corners, and you can pick your Bluetooth headset as the microphone."
