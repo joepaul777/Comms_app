@@ -12,7 +12,7 @@ VAPID_PUBLIC_KEY = "BFFlmdibS8j3gKojzELdBKQ3nWIwNyaE9ALd57rVqp55hBPTGKmARlfEBwPJ
 
 # The newest Comms release. Raise LATEST_BUILD (it must match the "+number" in
 # pubspec.yaml) and redeploy, and every phone on an older build is offered the update.
-LATEST_VERSION = "2.2.5"
-LATEST_BUILD = "5011"
+LATEST_VERSION = "2.2.6"
+LATEST_BUILD = "5012"
 DOWNLOAD_URL = "https://joepaul.vercel.app/downloads/Comms.apk"
-RELEASE_NOTES = "Clearer calls: voices now sound fuller and hold up better on weak connections, with noise reduction that really works on Android. New call settings button (top left during a call) to switch microphone, sound output and noise reduction mid-call."
+RELEASE_NOTES = "Video calls can now keep going in a small floating window: go home or press back during a video call. The window is shaped like the other person's screen. Also new: Comms on iPhone (add jp-comms.web.app to the Home Screen), with notifications even when Comms is closed."
