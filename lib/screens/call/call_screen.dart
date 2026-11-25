@@ -31,6 +31,8 @@ class _CallScreenState extends State<CallScreen> with TickerProviderStateMixin {
   Alignment _pipCorner = Alignment.topRight;
   Offset? _pipDrag;
   bool _popped = false;
+  int _localVersion = 0;
+  String? _appliedSpeaker;
 
   @override
   void initState() {
@@ -59,8 +61,22 @@ class _CallScreenState extends State<CallScreen> with TickerProviderStateMixin {
       return;
     }
     if (_renderersReady) {
-      if (_local.srcObject != _calls.localStream) _local.srcObject = _calls.localStream;
-      if (_remote.srcObject != _calls.remoteStream) _remote.srcObject = _calls.remoteStream;
+      // A swapped camera or microphone keeps the same stream, so it is attached again.
+      if (_local.srcObject != _calls.localStream || _localVersion != _calls.localTracksVersion) {
+        _localVersion = _calls.localTracksVersion;
+        _local.srcObject = null;
+        _local.srcObject = _calls.localStream;
+      }
+      if (_remote.srcObject != _calls.remoteStream) {
+        _remote.srcObject = _calls.remoteStream;
+        _appliedSpeaker = null;
+      }
+      // In a browser, play their voice through the chosen speaker.
+      final speaker = _calls.speakerId;
+      if (kIsWeb && speaker != null && _calls.remoteStream != null && speaker != _appliedSpeaker) {
+        _appliedSpeaker = speaker;
+        _remote.audioOutput(speaker);
+      }
     }
     if (_calls.phase == CallPhase.ended) HapticFeedback.mediumImpact();
     setState(() {});
@@ -199,6 +215,27 @@ class _CallScreenState extends State<CallScreen> with TickerProviderStateMixin {
                     ),
                   // Your own camera: drag it anywhere and it settles in the nearest corner.
                   if (showLocalVideo) _selfView(Size(box.maxWidth, box.maxHeight), videoLive),
+                  // Microphone, speaker, camera and noise reduction.
+                  if (_calls.phase != CallPhase.incoming && _calls.phase != CallPhase.ended)
+                    Positioned(
+                      top: MediaQuery.paddingOf(context).top + 12,
+                      left: 14,
+                      child: AnimatedOpacity(
+                        opacity: _controlsVisible || !videoLive ? 1 : 0,
+                        duration: const Duration(milliseconds: 250),
+                        child: Semantics(
+                          button: true,
+                          label: 'Call settings',
+                          child: CircleIconButton(
+                            icon: Icons.tune_rounded,
+                            size: 44,
+                            onTap: _openSettings,
+                            background: Colors.black.withValues(alpha: 0.45),
+                            foreground: AppColors.text,
+                          ),
+                        ),
+                      ),
+                    ),
                   // Controls
                   Positioned(
                     left: 0,
@@ -420,6 +457,111 @@ class _CallScreenState extends State<CallScreen> with TickerProviderStateMixin {
     );
     if (picked != null) await _calls.selectAudioOutput(picked);
   }
+
+  /// Microphone, speaker, camera and noise reduction, changeable during the call.
+  Future<void> _openSettings() async {
+    unawaited(_calls.refreshDevices());
+    await showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: AppColors.bgAlt,
+      builder: (sheet) => ListenableBuilder(
+        listenable: _calls,
+        builder: (context, _) {
+          final video = _calls.call?.isVideo == true;
+          return SafeArea(
+            child: ConstrainedBox(
+              constraints: BoxConstraints(maxHeight: MediaQuery.sizeOf(context).height * 0.8),
+              child: ListView(
+                shrinkWrap: true,
+                padding: const EdgeInsets.fromLTRB(8, 4, 8, 12),
+                children: [
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(12, 0, 12, 4),
+                    child: Text('Call settings', style: AppTheme.display(20, weight: FontWeight.w700)),
+                  ),
+                  SwitchListTile(
+                    value: _calls.noiseReduction,
+                    onChanged: _calls.setNoiseReduction,
+                    secondary: const Icon(Icons.graphic_eq_rounded, color: AppColors.primary),
+                    title: const Text('Noise reduction'),
+                    subtitle: const Text('Filters out background noise so your voice comes through clearly'),
+                  ),
+                  _settingsHeading('Microphone'),
+                  if (_calls.microphones.isEmpty)
+                    _settingsNote('No microphone found')
+                  else
+                    for (final mic in _calls.microphones)
+                      _choice(
+                        icon: Icons.mic_rounded,
+                        label: _deviceLabel(mic.label, 'Microphone'),
+                        selected: mic.deviceId == _calls.microphoneId || (_calls.microphoneId == null && mic == _calls.microphones.first),
+                        onTap: () => _calls.selectMicrophone(mic.deviceId),
+                      ),
+                  _settingsHeading('Sound'),
+                  if (kIsWeb)
+                    if (_calls.speakers.isEmpty)
+                      _settingsNote("This browser plays calls through your computer's sound settings")
+                    else
+                      for (final speaker in _calls.speakers)
+                        _choice(
+                          icon: Icons.volume_up_rounded,
+                          label: _deviceLabel(speaker.label, 'Speaker'),
+                          selected: speaker.deviceId == (_calls.speakerId ?? 'default') ||
+                              (_calls.speakerId == null && !_calls.speakers.any((s) => s.deviceId == 'default') && speaker == _calls.speakers.first),
+                          onTap: () => _calls.selectSpeaker(speaker.deviceId),
+                        )
+                  else
+                    for (final output in _calls.audioOutputs)
+                      _choice(
+                        icon: _outputIcon(output),
+                        label: _outputName(output),
+                        selected: output == _calls.audioOutput,
+                        onTap: () => _calls.selectAudioOutput(output),
+                      ),
+                  if (video && kIsWeb && _calls.cameras.length > 1) ...[
+                    _settingsHeading('Camera'),
+                    for (final cam in _calls.cameras)
+                      _choice(
+                        icon: Icons.videocam_rounded,
+                        label: _deviceLabel(cam.label, 'Camera'),
+                        selected: cam.deviceId == _calls.cameraId || (_calls.cameraId == null && cam == _calls.cameras.first),
+                        onTap: () => _calls.selectCamera(cam.deviceId),
+                      ),
+                  ],
+                ],
+              ),
+            ),
+          );
+        },
+      ),
+    );
+  }
+
+  /// Browsers add things like "Default - " and "(0bda:58fd)" to names; keep the readable part.
+  static String _deviceLabel(String label, String fallback) {
+    var l = label.replaceAll(RegExp(r'\s*\([0-9a-fA-F]{4}:[0-9a-fA-F]{4}\)'), '').trim();
+    if (l.startsWith('Default - ')) l = 'Default (${l.substring(10)})';
+    if (l.startsWith('Communications - ')) l = 'Calls default (${l.substring(17)})';
+    return l.isEmpty ? fallback : l;
+  }
+
+  Widget _settingsHeading(String text) => Padding(
+        padding: const EdgeInsets.fromLTRB(16, 16, 16, 4),
+        child: Text(text.toUpperCase(), style: AppTheme.body(12, weight: FontWeight.w700, color: AppColors.textMuted)),
+      );
+
+  Widget _settingsNote(String text) => Padding(
+        padding: const EdgeInsets.fromLTRB(16, 4, 16, 4),
+        child: Text(text, style: AppTheme.body(13.5, color: AppColors.textMuted)),
+      );
+
+  Widget _choice({required IconData icon, required String label, required bool selected, required VoidCallback onTap}) => ListTile(
+        leading: Icon(icon, color: selected ? AppColors.primary : AppColors.textMuted),
+        title: Text(label, maxLines: 1, overflow: TextOverflow.ellipsis),
+        trailing: selected ? const Icon(Icons.check_rounded, color: AppColors.primary) : null,
+        onTap: onTap,
+      );
 
   Widget _activeControls(bool video) {
     final ended = _calls.phase == CallPhase.ended;

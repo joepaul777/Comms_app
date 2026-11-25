@@ -82,7 +82,29 @@ Future<void> main() async {
         calls.toggleCamera();
         return 'ok';
       })).toJS);
+  _hook('commsDevices', (() => _guard(() async {
+        await calls.refreshDevices();
+        return jsonEncode({
+          'mics': calls.microphones.map((d) => d.deviceId).toList(),
+          'speakers': calls.speakers.map((d) => d.deviceId).toList(),
+        });
+      })).toJS);
+  _hook('commsSelectMic', ((JSString id) => _guard(() async {
+        await calls.selectMicrophone(id.toDart);
+        return 'ok';
+      })).toJS);
+  _hook('commsSelectSpeaker', ((JSString id) => _guard(() async {
+        await calls.selectSpeaker(id.toDart);
+        return 'ok';
+      })).toJS);
+  _hook('commsNoise', ((JSBoolean on) => _guard(() async {
+        await calls.setNoiseReduction(on.toDart);
+        return 'ok';
+      })).toJS);
   _hook('commsState', (() => jsonEncode({
+        'mic': calls.localStream?.getAudioTracks().firstOrNull?.getSettings()['deviceId'],
+        'micLive': calls.localStream?.getAudioTracks().firstOrNull?.enabled,
+        'noise': calls.noiseReduction,
         'phase': calls.phase.name,
         'message': calls.endMessage,
         'status': calls.call?.status.name,

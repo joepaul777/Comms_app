@@ -14,6 +14,7 @@ const CHROME = process.env.CHROME || 'C:/Program Files/Google/Chrome/Application
 const APP = process.env.APP || 'http://127.0.0.1:8770/';
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 const browsers = [];
+const devicesOpened = [];
 
 async function openDevice(name, port, { noCamera = false, size = '1200,800', video } = {}) {
   const profile = mkdtempSync(join(tmpdir(), `comms-${name}-`));
@@ -27,7 +28,7 @@ async function openDevice(name, port, { noCamera = false, size = '1200,800', vid
   ], { stdio: 'ignore' });
   browsers.push({ proc, profile });
   let target;
-  for (let i = 0; i < 50 && !target; i++) {
+  for (let i = 0; i < 150 && !target; i++) {
     await sleep(200);
     try {
       target = (await (await fetch(`http://127.0.0.1:${port}/json`)).json()).find(t => t.type === 'page');
@@ -41,6 +42,7 @@ async function openDevice(name, port, { noCamera = false, size = '1200,800', vid
   ws.addEventListener('message', ev => {
     const m = JSON.parse(ev.data);
     if (m.id && pending.has(m.id)) { pending.get(m.id)(m); pending.delete(m.id); }
+    if (m.method === 'Log.entryAdded' && m.params.entry.level === 'error') errors.push(`${m.params.entry.text} ${m.params.entry.url ?? ''}`.slice(0, 300));
     if (m.method === 'Runtime.exceptionThrown') errors.push(m.params.exceptionDetails.exception?.description?.split('\n')[0]);
     if (m.method === 'Runtime.consoleAPICalled' && /fail|error/i.test(JSON.stringify(m.params.args))) {
       errors.push(m.params.args.map(a => a.value ?? '').join(' ').slice(0, 200));
@@ -48,6 +50,7 @@ async function openDevice(name, port, { noCamera = false, size = '1200,800', vid
   });
   const send = (method, params = {}) => new Promise(r => { const i = ++id; pending.set(i, r); ws.send(JSON.stringify({ id: i, method, params })); });
   await send('Runtime.enable');
+  await send('Log.enable');
   await send('Page.enable');
   if (noCamera) {
     // Like a computer without a webcam: asking for the camera fails, the microphone works.
@@ -101,6 +104,8 @@ async function openDevice(name, port, { noCamera = false, size = '1200,800', vid
       throw new Error(`${name} never got to "${what}"; last state ${JSON.stringify(s)}`);
     },
   };
+  device.close = () => proc.kill();
+  devicesOpened.push(device);
   return device;
 }
 
@@ -126,24 +131,13 @@ try {
   // someone still marked as on a call) gets in the way.
   await fetch('http://127.0.0.1:8080/emulator/v1/projects/demo-comms/databases/(default)/documents', { method: 'DELETE' });
   await fetch('http://127.0.0.1:9099/emulator/v1/projects/demo-comms/accounts', { method: 'DELETE' });
+  // Tests run in stages with only the browsers each needs open: a laptop with little
+  // free memory otherwise starves them and calls time out for no real reason.
   const alice = await openDevice('alice', 9401);
   const bob = await openDevice('bob', 9402);
-  const carolPhone = await openDevice('carol-1', 9403);
-  const carolPc = await openDevice('carol-2', 9404);
-  const dave = await openDevice('dave', 9405, { noCamera: true });
-  // Chrome's fake test camera can only be opened once per browser, so the no-camera
-  // test talks to someone whose camera hasn't been used yet. (Real cameras are fine.)
-  const erin = await openDevice('erin', 9406);
-  const all = [alice, bob, carolPhone, carolPc, dave, erin];
+  const all = [alice, bob];
   // The sign-in emulator makes up each account's id, so calls use the ids it hands back.
-  const uid = {
-    alice: await alice.signIn('alice'),
-    bob: await bob.signIn('bob'),
-    carol: await carolPhone.signIn('carol'),
-    dave: await dave.signIn('dave'),
-    erin: await erin.signIn('erin'),
-  };
-  if ((await carolPc.signIn('carol')) !== uid.carol) throw new Error('carol got two different accounts');
+  const uid = { alice: await alice.signIn('alice'), bob: await bob.signIn('bob') };
   await sleep(6000); // home screens load and start listening for calls
 
   await test('voice call: rings, is answered, both hear each other, hang-up reaches the other side', async () => {
@@ -154,6 +148,20 @@ try {
     await bob.waitFor(connectedWith(['audio']), 'connected with audio');
     await sleep(3000);
     await alice.waitFor(phase('connected'), 'still connected');
+    // Mid-call: another microphone, noise reduction off and on, another speaker.
+    const devices = JSON.parse(await alice.run('commsDevices()'));
+    const before = await alice.state();
+    const other = devices.mics.find(id => id !== before.mic && id !== 'default' && id !== 'communications');
+    if (!other) throw new Error(`only one microphone to choose from: ${JSON.stringify(devices.mics)}`);
+    await alice.run(`commsSelectMic(${JSON.stringify(other)})`);
+    const switched = await alice.waitFor(s => s.mic === other, 'using the other microphone', 8000);
+    if (switched.phase !== 'connected' || !(switched.local || []).includes('audio')) throw new Error(`call broke after switching microphone: ${JSON.stringify(switched)}`);
+    await alice.run('commsNoise(false)');
+    await alice.run('commsNoise(true)');
+    if (devices.speakers.length) await alice.run(`commsSelectSpeaker(${JSON.stringify(devices.speakers.at(-1))})`);
+    await sleep(2000);
+    await alice.waitFor(connectedWith(['audio']), 'still connected after the device changes', 3000);
+    await bob.waitFor(connectedWith(['audio']), 'still hearing alice', 3000);
     await alice.hangUp();
     const b = await bob.waitFor(s => s.phase === 'ended' || idle(s), 'call ended');
     if (b.phase === 'ended' && b.message !== 'Call ended') throw new Error(`bob saw "${b.message}"`);
@@ -192,6 +200,14 @@ try {
     if (a.phase === 'ended' && a.message !== 'Missed call') throw new Error(`alice saw "${a.message}"`);
   });
 
+  bob.close();
+  const carolPhone = await openDevice('carol-1', 9403);
+  const carolPc = await openDevice('carol-2', 9404);
+  all.push(carolPhone, carolPc);
+  uid.carol = await carolPhone.signIn('carol');
+  if ((await carolPc.signIn('carol')) !== uid.carol) throw new Error('carol got two different accounts');
+  await sleep(6000);
+
   await test('same account on two devices: both ring, answering on one stops the other, and the call survives', async () => {
     await sleep(11000);
     await alice.call(uid.carol, false);
@@ -212,18 +228,29 @@ try {
 
   await test('same account on two devices: declining on one stops both and the caller sees "Declined"', async () => {
     await sleep(11000);
-    await bob.call(uid.carol, true);
+    await alice.call(uid.carol, true);
     await carolPhone.waitFor(phase('incoming'), 'ringing (device 1)');
     await carolPc.waitFor(phase('incoming'), 'ringing (device 2)');
     await carolPc.decline();
     const first = await carolPhone.waitFor(s => s.phase === 'ended' || idle(s), 'stop ringing');
     if (first.phase === 'ended' && first.message !== 'Declined') throw new Error(`device 1 saw "${first.message}"`);
-    const b = await bob.waitFor(s => s.phase === 'ended', 'ended');
-    if (b.message !== 'Declined') throw new Error(`bob saw "${b.message}"`);
+    const b = await alice.waitFor(s => s.phase === 'ended', 'ended');
+    if (b.message !== 'Declined') throw new Error(`alice saw "${b.message}"`);
   });
 
+  alice.close();
+  carolPhone.close();
+  carolPc.close();
+  const dave = await openDevice('dave', 9405, { noCamera: true });
+  // Chrome's fake test camera can only be opened once per browser, so the no-camera
+  // test talks to someone whose camera hasn't been used yet. (Real cameras are fine.)
+  const erin = await openDevice('erin', 9406);
+  all.push(dave, erin);
+  uid.dave = await dave.signIn('dave');
+  uid.erin = await erin.signIn('erin');
+  await sleep(6000);
+
   await test('no camera: a video call still connects, with voice one way and video the other', async () => {
-    await sleep(2000);
     { const r = await dave.call(uid.erin, true); if (r !== 'ok') throw new Error('could not start: ' + r); }
     await erin.waitFor(phase('incoming'), 'ringing');
     await erin.accept();
@@ -246,6 +273,8 @@ try {
   if (process.env.VIDEO && process.env.SHOTS) {
     await test('video call layout between a phone and a computer', async () => {
       const shots = process.env.SHOTS;
+      dave.close();
+      erin.close();
       const phone = await openDevice('phone', 9407, { size: '400,860', video: process.env.VIDEO });
       const pc = await openDevice('pc', 9408, { size: '1280,800', video: process.env.PC_VIDEO });
       all.push(phone, pc);
@@ -267,6 +296,13 @@ try {
       await pc.drag([1100, 120], [300, 600]);
       await sleep(1200);
       await pc.screenshot(`${shots}/3-pc-self-view-moved.png`);
+      // The call settings sheet (button at the top left).
+      await pc.drag([36, 36], [36, 36]);
+      await sleep(1500);
+      await pc.screenshot(`${shots}/3b-pc-call-settings.png`);
+      await pc.run(`(() => { document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' })); return 'ok'; })()`);
+      await pc.drag([640, 60], [640, 60]);
+      await sleep(800);
       await phone.run('commsToggleCamera()');
       await sleep(3000);
       await pc.screenshot(`${shots}/4-pc-when-phone-camera-off.png`);
@@ -275,23 +311,10 @@ try {
     });
   }
 
-  if (process.env.PROBE) {
-    const probe = `(async () => {
-      const devices = (await navigator.mediaDevices.enumerateDevices()).map(d => d.kind + ':' + (d.label || '?')).join(', ');
-      let video;
-      try { const s = await navigator.mediaDevices.getUserMedia({ video: true }); video = 'ok ' + s.getVideoTracks()[0].label; s.getTracks().forEach(t => t.stop()); }
-      catch (e) { video = e.name + ' ' + e.message; }
-      let exact;
-      try { const s = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'user', width: 1280, height: 720, frameRate: 30 } }); exact = 'ok'; s.getTracks().forEach(t => t.stop()); }
-      catch (e) { exact = e.name + ' ' + e.message; }
-      return JSON.stringify({ devices, video, exact });
-    })()`;
-    for (const d of [alice, bob, dave]) console.log('probe', d.name, await d.run(probe));
-  }
-
   const errors = all.flatMap(d => d.errors.map(e => `${d.name}: ${e}`));
   if (errors.length) console.log('\nconsole errors:\n' + [...new Set(errors)].join('\n'));
 } catch (e) {
+  for (const d of devicesOpened) for (const err of d.errors) console.log(`${d.name}: ${err}`);
   results.push(`FAIL setup: ${e.message}`);
   console.log(results.at(-1));
 } finally {

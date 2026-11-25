@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
@@ -10,6 +11,7 @@ import '../config.dart';
 import '../models/call_model.dart';
 import '../models/user_model.dart';
 import '../platform/platform.dart';
+import 'call_audio.dart';
 import 'notification_service.dart';
 import 'push_api.dart';
 import 'rate_limiter.dart';
@@ -160,7 +162,8 @@ class CallService extends ChangeNotifier {
     try {
       await _openConnection(type == CallType.video);
       _pc!.onIceCandidate = (c) => _sendCandidate(callId, 'callerCandidates', c);
-      final offer = await _pc!.createOffer();
+      final raw = await _pc!.createOffer();
+      final offer = RTCSessionDescription(clearVoiceSdp(raw.sdp ?? ''), raw.type);
       await _pc!.setLocalDescription(offer);
       if (phase != CallPhase.outgoing) return null; // hung up while setting up
       await _db.collection('calls').doc(callId).update({'offer': {'sdp': offer.sdp, 'type': offer.type}});
@@ -277,7 +280,8 @@ class CallService extends ChangeNotifier {
 
       await _pc!.setRemoteDescription(RTCSessionDescription(offer['sdp'], offer['type']));
       await _flushCandidates();
-      final answer = await _pc!.createAnswer();
+      final raw = await _pc!.createAnswer();
+      final answer = RTCSessionDescription(clearVoiceSdp(raw.sdp ?? ''), raw.type);
       await _pc!.setLocalDescription(answer);
       await _db.collection('calls').doc(current.id).update({
         'answer': {'sdp': answer.sdp, 'type': answer.type},
@@ -417,9 +421,28 @@ class CallService extends ChangeNotifier {
   /// computer without a webcam still joins a video call with its voice, and one whose
   /// microphone is blocked still hears the other person.
   Future<MediaStream?> _getMedia(bool video) async {
-    const audio = {'echoCancellation': true, 'noiseSuppression': true, 'autoGainControl': true};
+    await _loadPrefs();
+    // The microphone and camera chosen last time (browsers), if still plugged in.
+    if (kIsWeb) await refreshDevices();
+    final savedMic = microphones.any((d) => d.deviceId == microphoneId) ? microphoneId : null;
+    final savedCam = cameras.any((d) => d.deviceId == cameraId) ? cameraId : null;
+    final audio = microphoneConstraints(web: kIsWeb, noiseReduction: noiseReduction, deviceId: savedMic);
+    const frontCamera = {'facingMode': 'user', 'width': 1280, 'height': 720, 'frameRate': 30};
     final attempts = <Map<String, dynamic>>[
-      {'audio': audio, 'video': video ? {'facingMode': 'user', 'width': 1280, 'height': 720, 'frameRate': 30} : false},
+      {
+        'audio': audio,
+        'video': !video
+            ? false
+            : savedCam == null
+                ? frontCamera
+                : {
+                    'deviceId': {'exact': savedCam},
+                    'width': 1280,
+                    'height': 720,
+                    'frameRate': 30,
+                  },
+      },
+      if (video && savedCam != null) {'audio': audio, 'video': frontCamera},
       if (video) {'audio': audio, 'video': true},
       if (video) {'audio': audio, 'video': false},
       {'audio': true, 'video': false},
@@ -484,6 +507,7 @@ class CallService extends ChangeNotifier {
     };
     _pc!.onIceConnectionState = _onIceState;
     await _setUpAudio(video);
+    unawaited(refreshDevices());
     await WakelockPlus.enable().catchError((_) {});
     notifyListeners();
   }
@@ -560,6 +584,170 @@ class CallService extends ChangeNotifier {
       t.enabled = !muted;
     }
     notifyListeners();
+  }
+
+  // ---------------------------------------------------------------------------
+  // Microphone, camera and speaker choice, and noise reduction
+  // ---------------------------------------------------------------------------
+
+  /// Filters background noise and evens out the volume of your voice.
+  bool noiseReduction = true;
+
+  List<MediaDeviceInfo> microphones = const [];
+  List<MediaDeviceInfo> cameras = const [];
+
+  /// Browsers only: where the other person's voice plays (a phone uses [audioOutputs]).
+  List<MediaDeviceInfo> speakers = const [];
+
+  String? microphoneId;
+  String? cameraId;
+  String? speakerId;
+
+  /// Goes up whenever the microphone or camera is swapped, so the call screen shows
+  /// the new picture.
+  int localTracksVersion = 0;
+
+  bool _prefsLoaded = false;
+
+  Future<File> _prefsFile() async => File('${(await supportDirectory()).path}/call_devices.json');
+
+  Future<void> _loadPrefs() async {
+    if (_prefsLoaded) return;
+    _prefsLoaded = true;
+    try {
+      final f = await _prefsFile();
+      if (!await f.exists()) return;
+      final data = jsonDecode(await f.readAsString()) as Map;
+      noiseReduction = data['noiseReduction'] as bool? ?? true;
+      microphoneId = data['microphone'] as String?;
+      cameraId = data['camera'] as String?;
+      speakerId = data['speaker'] as String?;
+    } catch (_) {}
+  }
+
+  Future<void> _savePrefs() async {
+    try {
+      await (await _prefsFile()).writeAsString(jsonEncode({
+        'noiseReduction': noiseReduction,
+        // A phone's devices come and go (earbuds), so only a computer remembers them.
+        if (kIsWeb) 'microphone': microphoneId,
+        if (kIsWeb) 'camera': cameraId,
+        if (kIsWeb) 'speaker': speakerId,
+      }));
+    } catch (_) {}
+  }
+
+  /// Looks up the microphones, cameras and (in a browser) speakers there are now.
+  Future<void> refreshDevices() async {
+    try {
+      final all = await navigator.mediaDevices.enumerateDevices();
+      List<MediaDeviceInfo> of(String kind) {
+        final seen = <String>{};
+        return all.where((d) => d.kind == kind && d.deviceId.isNotEmpty && seen.add(d.deviceId)).toList();
+      }
+
+      microphones = of('audioinput');
+      cameras = of('videoinput');
+      speakers = kIsWeb ? of('audiooutput') : const [];
+      if (!kIsWeb) await _refreshOutputs();
+    } catch (e) {
+      debugPrint('device list failed: $e');
+    }
+    final mic = localStream?.getAudioTracks().firstOrNull;
+    if (kIsWeb && mic != null) {
+      // Browsers say which microphone the call is really using.
+      try {
+        final id = mic.getSettings()['deviceId'];
+        if (id is String && id.isNotEmpty) microphoneId = id;
+      } catch (_) {}
+    }
+    notifyListeners();
+  }
+
+  /// Swaps this call's microphone or camera for another without dropping the call.
+  Future<bool> _swapTrack(String kind, Map<String, dynamic> constraints) async {
+    final pc = _pc;
+    final stream = localStream;
+    if (pc == null || stream == null) return false;
+    MediaStream fresh;
+    try {
+      fresh = await navigator.mediaDevices.getUserMedia({
+        'audio': kind == 'audio' ? constraints : false,
+        'video': kind == 'video' ? constraints : false,
+      });
+    } catch (e) {
+      debugPrint('could not open the new $kind device: $e');
+      return false;
+    }
+    final track = fresh.getTracks().firstWhere((t) => t.kind == kind);
+    track.enabled = kind == 'audio' ? !muted : !cameraOff;
+    for (final sender in await pc.getSenders()) {
+      if (sender.track?.kind == kind) await sender.replaceTrack(track);
+    }
+    for (final old in stream.getTracks().where((t) => t.kind == kind).toList()) {
+      await stream.removeTrack(old);
+      await old.stop();
+    }
+    await stream.addTrack(track);
+    localTracksVersion++;
+    notifyListeners();
+    return true;
+  }
+
+  Future<void> selectMicrophone(String deviceId) async {
+    microphoneId = deviceId;
+    if (kIsWeb) {
+      await _swapTrack('audio', microphoneConstraints(web: true, noiseReduction: noiseReduction, deviceId: deviceId));
+    } else {
+      try {
+        await Helper.selectAudioInput(deviceId);
+      } catch (e) {
+        debugPrint('select microphone failed: $e');
+      }
+    }
+    notifyListeners();
+    await _savePrefs();
+  }
+
+  /// Browsers only (a phone has the Flip button).
+  Future<void> selectCamera(String deviceId) async {
+    final ok = await _swapTrack('video', {
+      'deviceId': {'exact': deviceId},
+      'width': 1280,
+      'height': 720,
+      'frameRate': 30,
+    });
+    if (ok) {
+      cameraId = deviceId;
+      await _savePrefs();
+    }
+  }
+
+  /// Browsers only: the call screen plays the other person's voice through it.
+  Future<void> selectSpeaker(String deviceId) async {
+    speakerId = deviceId;
+    notifyListeners();
+    await _savePrefs();
+  }
+
+  Future<void> setNoiseReduction(bool on) async {
+    noiseReduction = on;
+    notifyListeners();
+    final mic = localStream?.getAudioTracks().firstOrNull;
+    if (mic != null) {
+      var applied = false;
+      if (kIsWeb) {
+        try {
+          await mic.applyConstraints({'noiseSuppression': on, 'autoGainControl': on, 'echoCancellation': true});
+          applied = true;
+        } catch (_) {}
+      }
+      // Android sets these when the microphone opens, so it is opened again.
+      if (!applied) {
+        await _swapTrack('audio', microphoneConstraints(web: kIsWeb, noiseReduction: on, deviceId: kIsWeb ? microphoneId : null));
+      }
+    }
+    await _savePrefs();
   }
 
   Future<void> toggleSpeaker() => selectAudioOutput(audioOutput == 'speaker' ? _phoneOutput() : 'speaker');
