@@ -291,6 +291,11 @@ try {
       console.log('phone state', JSON.stringify(await phone.state()));
       console.log('pc camera', await pc.run(`(async () => (await navigator.mediaDevices.enumerateDevices()).filter(d => d.kind === 'videoinput').map(d => d.label).join(',') || 'none')()`));
       await pc.screenshot(`${shots}/1-pc-sees-phone.png`);
+      // The pop-out button (top left, next to call settings).
+      await pc.drag([88, 34], [88, 34]);
+      await sleep(1500);
+      console.log('pop-out', await pc.run(`JSON.stringify({ supported: document.pictureInPictureEnabled, open: !!document.pictureInPictureElement, size: document.pictureInPictureElement ? document.pictureInPictureElement.videoWidth + 'x' + document.pictureInPictureElement.videoHeight : null })`));
+      await pc.run(`document.pictureInPictureElement ? document.exitPictureInPicture().then(() => 'closed') : 'none'`);
       await phone.screenshot(`${shots}/2-phone-sees-pc.png`);
       // Drag the computer's own picture from the top right towards the bottom left.
       await pc.drag([1100, 120], [300, 600]);

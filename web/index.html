@@ -9,19 +9,32 @@
   <meta name="theme-color" content="#0A0A0A">
   <meta name="color-scheme" content="dark">
 
+  <!-- Added to an iPhone's Home Screen, Comms opens full screen like an app. -->
   <meta name="mobile-web-app-capable" content="yes">
-  <meta name="apple-mobile-web-app-status-bar-style" content="black">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <meta name="apple-mobile-web-app-title" content="Comms">
-  <link rel="apple-touch-icon" href="icons/Icon-192.png">
+  <link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
   <link rel="icon" type="image/png" href="favicon.png"/>
 
   <title>Comms</title>
   <link rel="manifest" href="manifest.json">
   <style>
-    html, body { margin: 0; height: 100%; background: #0A0A0A; }
+    html, body {
+      margin: 0; height: 100%; background: #0A0A0A;
+      overscroll-behavior: none; -webkit-tap-highlight-color: transparent;
+    }
+    /* Comms draws here, kept clear of an iPhone's notch, rounded corners and home bar. */
+    #app {
+      position: fixed;
+      top: env(safe-area-inset-top, 0px);
+      right: env(safe-area-inset-right, 0px);
+      bottom: env(safe-area-inset-bottom, 0px);
+      left: env(safe-area-inset-left, 0px);
+    }
     #splash {
       position: fixed; inset: 0; display: flex; align-items: center; justify-content: center;
-      transition: opacity .3s ease;
+      transition: opacity .3s ease; z-index: 10;
     }
     #splash div {
       width: 84px; height: 84px; border-radius: 26px; background: #FACC15; color: #0A0A0A;
@@ -33,6 +46,7 @@
   </style>
 </head>
 <body>
+  <div id="app"></div>
   <div id="splash"><div>CO.</div></div>
   <script>
     // Hide the loading mark once the app has drawn its first frame.

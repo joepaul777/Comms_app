@@ -6,6 +6,9 @@ compatibility_date = "2025-06-01"
 PROJECT_ID = "jp-comms"
 # Your Metered dashboard address, e.g. "yourname.metered.live"
 METERED_DOMAIN = "joepaul.metered.live"
+# Identifies Comms to browsers' push services (Comms Web notifications). Public by
+# design; the matching private key is the VAPID_PRIVATE_KEY secret.
+VAPID_PUBLIC_KEY = "BFFlmdibS8j3gKojzELdBKQ3nWIwNyaE9ALd57rVqp55hBPTGKmARlfEBwPJB7ICwYXfr1sEL0OL2sKGEYtYGHY"
 
 # The newest Comms release. Raise LATEST_BUILD (it must match the "+number" in
 # pubspec.yaml) and redeploy, and every phone on an older build is offered the update.

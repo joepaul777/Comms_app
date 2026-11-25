@@ -9,6 +9,7 @@ import '../../theme/app_colors.dart';
 import '../../theme/app_theme.dart';
 import '../../widgets/avatar.dart';
 import '../../widgets/ui.dart';
+import '../../widgets/web_tips.dart';
 import '../contacts/person_profile_screen.dart';
 import 'create_group_screen.dart';
 import 'offline_lobby_screen.dart';
@@ -62,6 +63,7 @@ class _ChatListScreenState extends State<ChatListScreen> {
             padding: const EdgeInsets.fromLTRB(16, 4, 16, 8),
             child: SearchField(controller: _filter, hint: 'Search chats', onChanged: (v) => setState(() => _query = v.trim().toLowerCase())),
           ),
+          if (kIsWeb) const WebTips(),
           Expanded(
             child: StreamBuilder<List<ChatRoomModel>>(
               stream: _rooms,

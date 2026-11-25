@@ -1,6 +1,10 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:js_interop';
 import 'dart:js_interop_unsafe';
+import 'dart:typed_data';
+import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/foundation.dart';
 import 'package:web/web.dart' as web;
 import '../models/call_model.dart';
@@ -14,9 +18,10 @@ export 'notification_tap.dart';
 
 /// Notifications in the browser.
 ///
-/// There are no pushes here: while Comms is open in a tab, it watches your chats
-/// itself and shows the browser's own notification for a new message or a call.
-/// Your phone still gets the pushes as usual.
+/// While Comms is open in a tab, it watches your chats itself and shows the browser's
+/// own notifications. Once notifications are allowed, the browser also gets web push
+/// (push_sw.js), so messages and calls arrive with Comms closed, including on an
+/// iPhone with Comms added to the Home Screen. Your phone still gets its own pushes.
 class NotificationService {
   NotificationService._();
   static final NotificationService instance = NotificationService._();
@@ -43,16 +48,142 @@ class NotificationService {
   final Map<String, DateTime> _seen = {};
   final Map<String, web.Notification> _shown = {};
 
-  Future<void> initialize() async {}
+  /// Identifies Comms to the browsers' push services (the private half is on the server).
+  static const _vapidPublicKey = 'BFFlmdibS8j3gKojzELdBKQ3nWIwNyaE9ALd57rVqp55hBPTGKmARlfEBwPJB7ICwYXfr1sEL0OL2sKGEYtYGHY';
 
-  /// Phones register for pushes; a browser tab does not.
-  Future<void> saveDeviceToken() async {}
+  bool _pushActive = false;
 
-  /// Signing out of the browser must not stop the phone's notifications.
+  Future<void> initialize() async {
+    // A notification tapped while Comms was closed opens it with ?open=chat|<id>.
+    final open = Uri.base.queryParameters['open'];
+    if (open != null && open.isNotEmpty) {
+      _deliverOpen(open);
+      try {
+        web.window.history.replaceState(null, '', Uri.base.replace(queryParameters: {}).toString().replaceAll('?', ''));
+      } catch (_) {}
+    }
+    if (!pushSupported) return;
+    try {
+      await web.window.navigator.serviceWorker.register('push_sw.js'.toJS).toDart;
+      // A notification tapped while Comms is already open.
+      web.window.navigator.serviceWorker.onmessage = ((web.MessageEvent event) {
+        final data = event.data;
+        if (data is JSObject && data.has('commsOpen')) {
+          final open = data.getProperty<JSAny?>('commsOpen'.toJS);
+          if (open is JSString) _deliverOpen(open.toDart);
+        }
+      }).toJS;
+    } catch (e) {
+      debugPrint('notification worker failed: $e');
+    }
+  }
+
+  void _deliverOpen(String open) {
+    final parts = open.split('|');
+    if (parts.length < 2 || parts[1].isEmpty) return;
+    _deliver(NotificationTap(parts[0], parts[1], ''));
+  }
+
+  /// True when this browser can get notifications with Comms closed.
+  bool get pushSupported {
+    try {
+      return web.window.navigator.has('serviceWorker') && web.window.has('PushManager') && _supported;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /// An iPhone or iPad (iPads say they are Macs, but have touch screens).
+  bool get isApplePhone {
+    final ua = web.window.navigator.userAgent;
+    return ua.contains('iPhone') || ua.contains('iPad') || (ua.contains('Macintosh') && web.window.navigator.maxTouchPoints > 1);
+  }
+
+  /// Opened from the Home Screen (as an app) rather than in a browser tab.
+  bool get isInstalled {
+    try {
+      if (web.window.matchMedia('(display-mode: standalone)').matches) return true;
+      final standalone = web.window.navigator.getProperty<JSAny?>('standalone'.toJS);
+      return standalone is JSBoolean && standalone.toDart;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /// Turns on web push for this browser when notifications are allowed.
+  Future<void> saveDeviceToken() async {
+    if (await permitted()) await _subscribe();
+  }
+
+  static String _browserId(String endpoint) {
+    var hash = 0x811c9dc5;
+    for (final unit in endpoint.codeUnits) {
+      hash = ((hash ^ unit) * 0x01000193) & 0xffffffff;
+    }
+    return 'w${hash.toRadixString(16)}';
+  }
+
+  static String _b64url(JSArrayBuffer? buffer) =>
+      buffer == null ? '' : base64Url.encode(buffer.toDart.asUint8List()).replaceAll('=', '');
+
+  static Uint8List _keyBytes(String b64url) => base64Url.decode(b64url.padRight((b64url.length + 3) ~/ 4 * 4, '='));
+
+  DocumentReference<Map<String, dynamic>>? _privateDoc() {
+    final uid = FirebaseAuth.instance.currentUser?.uid;
+    return uid == null ? null : FirebaseFirestore.instance.collection('users').doc(uid).collection('private').doc('data');
+  }
+
+  Future<web.PushSubscription?> _currentSubscription() async {
+    try {
+      final reg = await web.window.navigator.serviceWorker.ready.toDart;
+      return await reg.pushManager.getSubscription().toDart;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  Future<void> _subscribe() async {
+    final doc = _privateDoc();
+    if (!pushSupported || doc == null) return;
+    try {
+      final reg = await web.window.navigator.serviceWorker.ready.toDart;
+      final sub = await reg.pushManager.getSubscription().toDart ??
+          await reg.pushManager
+              .subscribe(web.PushSubscriptionOptionsInit(userVisibleOnly: true, applicationServerKey: _keyBytes(_vapidPublicKey).toJS))
+              .toDart;
+      final endpoint = sub.endpoint;
+      // Only this person can read their private document (and the Comms server).
+      await doc.set({
+        'webPush': {
+          _browserId(endpoint): {
+            'endpoint': endpoint,
+            'p256dh': _b64url(sub.getKey('p256dh')),
+            'auth': _b64url(sub.getKey('auth')),
+            'at': DateTime.now().millisecondsSinceEpoch,
+          },
+        },
+      }, SetOptions(merge: true));
+      _pushActive = true;
+    } catch (e) {
+      debugPrint('web push subscribe failed: $e');
+    }
+  }
+
+  /// Signing out of the browser stops its notifications, but not the phone's.
   Future<void> forgetDevice() async {
     await _rooms?.cancel();
     _rooms = null;
     _watching = null;
+    final sub = await _currentSubscription();
+    if (sub != null) {
+      try {
+        await _privateDoc()?.update({'webPush.${_browserId(sub.endpoint)}': FieldValue.delete()});
+      } catch (_) {}
+      try {
+        await sub.unsubscribe().toDart;
+      } catch (_) {}
+    }
+    _pushActive = false;
   }
 
   bool get _supported {
@@ -65,11 +196,17 @@ class NotificationService {
 
   Future<bool> permitted() async => _supported && web.Notification.permission == 'granted';
 
+  /// 'granted', 'denied', 'default' (not asked yet) or 'unsupported'.
+  Future<String> permissionState() async => _supported ? web.Notification.permission : 'unsupported';
+
+  /// Must be called straight from a tap (iPhones only ask then).
   Future<bool> askPermission() async {
     if (!_supported) return false;
     try {
       final answer = await web.Notification.requestPermission().toDart;
-      return answer.toDart == 'granted';
+      final granted = answer.toDart == 'granted';
+      if (granted) await _subscribe();
+      return granted;
     } catch (_) {
       return false;
     }
@@ -133,7 +270,7 @@ class NotificationService {
   }
 
   void _show(String tag, String title, String body, VoidCallback onTap, {bool stay = false}) {
-    if (!_supported || web.Notification.permission != 'granted') return;
+    if (!_supported || web.Notification.permission != 'granted' || _pushActive) return;
     try {
       _shown.remove(tag)?.close();
       final note = web.Notification(

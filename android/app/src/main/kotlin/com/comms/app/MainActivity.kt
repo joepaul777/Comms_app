@@ -2,11 +2,15 @@ package com.comms.app
 
 import android.app.Activity
 import android.app.KeyguardManager
+import android.app.PictureInPictureParams
+import android.content.res.Configuration
+import android.util.Rational
 import android.content.Context
 import android.content.Intent
 import android.os.Build
 import android.os.Bundle
 import android.view.WindowManager
+import androidx.annotation.RequiresApi
 import cl.puntito.simple_pip_mode.PipCallbackHelperActivityWrapper
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
@@ -22,6 +26,43 @@ class MainActivity : PipCallbackHelperActivityWrapper() {
     private var assistantChannel: MethodChannel? = null
     private var pendingAssistant: Map<String, String>? = null
     private var unlockResult: MethodChannel.Result? = null
+
+    // Picture-in-picture during video calls: the call screen says when a call is live
+    // and the shape of the other person's picture (wide from a laptop, tall from a phone).
+    private var pipChannel: MethodChannel? = null
+    private var pipReady = false
+    private var pipRatio = Rational(9, 16)
+
+    @RequiresApi(Build.VERSION_CODES.O)
+    private fun pipParams(): PictureInPictureParams {
+        val builder = PictureInPictureParams.Builder().setAspectRatio(pipRatio)
+        if (Build.VERSION.SDK_INT >= 31) {
+            // Android 12+: going home slides straight into the small window.
+            builder.setAutoEnterEnabled(pipReady)
+            builder.setSeamlessResizeEnabled(true)
+        }
+        return builder.build()
+    }
+
+    private fun enterPip(): Boolean {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O || !pipReady) return false
+        return try {
+            enterPictureInPictureMode(pipParams())
+        } catch (e: Exception) {
+            false
+        }
+    }
+
+    /** Android before 12 has no automatic entry: go into the small window when the person leaves. */
+    override fun onUserLeaveHint() {
+        super.onUserLeaveHint()
+        if (Build.VERSION.SDK_INT in Build.VERSION_CODES.O until 31) enterPip()
+    }
+
+    override fun onPictureInPictureModeChanged(active: Boolean, newConfig: Configuration?) {
+        super.onPictureInPictureModeChanged(active, newConfig)
+        pipChannel?.invokeMethod("changed", active)
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -60,6 +101,35 @@ class MainActivity : PipCallbackHelperActivityWrapper() {
                 result.success(null)
             } else {
                 result.notImplemented()
+            }
+        }
+        pipChannel = MethodChannel(messenger, "comms/pip").apply {
+            setMethodCallHandler { call, result ->
+                when (call.method) {
+                    "setReady" -> {
+                        pipReady = call.argument<Boolean>("ready") == true
+                        val w = call.argument<Int>("width") ?: 9
+                        val h = call.argument<Int>("height") ?: 16
+                        // Android only allows shapes between 1:2.39 and 2.39:1.
+                        val ratio = (w.toDouble() / h.toDouble()).coerceIn(1 / 2.39 + 0.01, 2.39 - 0.01)
+                        pipRatio = Rational((ratio * 1000).toInt(), 1000)
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                            try {
+                                setPictureInPictureParams(pipParams())
+                            } catch (_: Exception) {}
+                        }
+                        result.success(null)
+                    }
+                    "enter" -> result.success(enterPip())
+                    "isActive" -> result.success(Build.VERSION.SDK_INT >= Build.VERSION_CODES.N && isInPictureInPictureMode)
+                    // The call ended while in the small window: put Comms away rather than
+                    // leaving a tiny chat list floating on the screen.
+                    "close" -> {
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N && isInPictureInPictureMode) moveTaskToBack(false)
+                        result.success(null)
+                    }
+                    else -> result.notImplemented()
+                }
             }
         }
         assistantChannel = MethodChannel(messenger, "comms/assistant").apply {

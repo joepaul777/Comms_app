@@ -520,6 +520,10 @@ class NotificationService {
   // on a phone, pushes do that work.
   void startWatching(String uid) {}
   Future<bool> permitted() async => true;
+  Future<String> permissionState() async => 'granted';
+  bool get pushSupported => true;
+  bool get isApplePhone => false;
+  bool get isInstalled => true;
   Future<bool> askPermission() async => true;
   Future<void> showRinging(CallModel call) async {}
 

@@ -51,6 +51,7 @@ class _ComposerState extends State<Composer> with SingleTickerProviderStateMixin
   late final AnimationController _pulse = AnimationController(vsync: this, duration: const Duration(milliseconds: 900))..repeat(reverse: true);
 
   bool _recording = false;
+  String _webFormat = 'webm';
   DateTime? _recordStart;
   Duration _elapsed = Duration.zero;
   Timer? _ticker;
@@ -161,9 +162,12 @@ class _ComposerState extends State<Composer> with SingleTickerProviderStateMixin
     }
     final dir = await temporaryDirectory();
     final path = '${dir.path}/voice-${DateTime.now().millisecondsSinceEpoch}.m4a';
+    // Phones record AAC (.m4a), which every device plays. Browsers that can (Safari,
+    // newer Chrome) do the same; the rest record Opus (.webm).
+    final aac = !kIsWeb || await _recorder.isEncoderSupported(AudioEncoder.aacLc);
+    _webFormat = aac ? 'm4a' : 'webm';
     await _recorder.start(
-      // Browsers can't record AAC; Opus is what they do well.
-      RecordConfig(encoder: kIsWeb ? AudioEncoder.opus : AudioEncoder.aacLc, bitRate: 64000, sampleRate: kIsWeb ? 48000 : 44100, numChannels: 1),
+      RecordConfig(encoder: aac ? AudioEncoder.aacLc : AudioEncoder.opus, bitRate: 64000, sampleRate: aac && !kIsWeb ? 44100 : 48000, numChannels: 1),
       path: path,
     );
     HapticFeedback.mediumImpact();
@@ -198,7 +202,7 @@ class _ComposerState extends State<Composer> with SingleTickerProviderStateMixin
     });
     if (path == null) return;
     // In a browser the recording comes back as a link to its bytes.
-    final file = await fileFromPicked(XFile(path, name: kIsWeb ? 'voice.webm' : null));
+    final file = await fileFromPicked(XFile(path, name: kIsWeb ? 'voice.$_webFormat' : null));
     if (!send || length < const Duration(milliseconds: 800)) {
       if (send && mounted) showSnack(context, 'Hold on a little longer to record', error: true);
       if (await file.exists()) await file.delete();

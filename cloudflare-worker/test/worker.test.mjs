@@ -47,6 +47,39 @@ const db = {
   'calls/c2': { id: 'c2', callerId: 'alice', callerName: 'Alice', receiverId: 'bob', status: 'rejected', endReason: 'declined', type: 'audio' },
 };
 
+// Carol also has Comms Web notifications on in a browser, plus an old browser that unsubscribed.
+const browserKeys = await webcrypto.subtle.generateKey({ name: 'ECDH', namedCurve: 'P-256' }, true, ['deriveBits']);
+const browserAuth = webcrypto.getRandomValues(new Uint8Array(16));
+const browserPublic = new Uint8Array(await webcrypto.subtle.exportKey('raw', browserKeys.publicKey));
+db['users/carol/private/data'].webPush = {
+  wabc: { endpoint: 'https://push.example/carol', p256dh: b64url(browserPublic), auth: b64url(browserAuth) },
+  wdead: { endpoint: 'https://push.example/gone', p256dh: b64url(browserPublic), auth: b64url(browserAuth) },
+};
+const vapid = await webcrypto.subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, true, ['sign', 'verify']);
+const vapidPublic = b64url(new Uint8Array(await webcrypto.subtle.exportKey('raw', vapid.publicKey)));
+const vapidPrivate = (await webcrypto.subtle.exportKey('jwk', vapid.privateKey)).d;
+const pushes = [];
+const patches = [];
+
+/** What a browser does with a push: unlock it with its own keys (RFC 8291). */
+async function unlockPush(body) {
+  const salt = body.slice(0, 16);
+  const idlen = body[20];
+  const serverPublic = body.slice(21, 21 + idlen);
+  const cipher = body.slice(21 + idlen);
+  const serverKey = await webcrypto.subtle.importKey('raw', serverPublic, { name: 'ECDH', namedCurve: 'P-256' }, false, []);
+  const shared = new Uint8Array(await webcrypto.subtle.deriveBits({ name: 'ECDH', public: serverKey }, browserKeys.privateKey, 256));
+  const hkdf = async (salt, ikm, info, n) => new Uint8Array(await webcrypto.subtle.deriveBits(
+    { name: 'HKDF', hash: 'SHA-256', salt, info }, await webcrypto.subtle.importKey('raw', ikm, 'HKDF', false, ['deriveBits']), n * 8));
+  const ikm = await hkdf(browserAuth, shared, new Uint8Array([...enc.encode('WebPush: info\0'), ...browserPublic, ...serverPublic]), 32);
+  const cek = await hkdf(salt, ikm, enc.encode('Content-Encoding: aes128gcm\0'), 16);
+  const nonce = await hkdf(salt, ikm, enc.encode('Content-Encoding: nonce\0'), 12);
+  const key = await webcrypto.subtle.importKey('raw', cek, 'AES-GCM', false, ['decrypt']);
+  const clear = new Uint8Array(await webcrypto.subtle.decrypt({ name: 'AES-GCM', iv: nonce }, key, cipher));
+  assert.equal(clear.at(-1), 2, 'last-record delimiter');
+  return JSON.parse(new TextDecoder().decode(clear.slice(0, -1)));
+}
+
 const sentFcm = [];
 let oauthCalls = 0;
 globalThis.fetch = async (input, init = {}) => {
@@ -62,7 +95,15 @@ globalThis.fetch = async (input, init = {}) => {
     assert.ok(ok, 'service account JWT must be signed with the service account key');
     return new Response(JSON.stringify({ access_token: 'access-1', expires_in: 3600 }));
   }
+  if (url.startsWith('https://push.example/')) {
+    pushes.push({ url, headers: init.headers, body: new Uint8Array(init.body) });
+    return new Response('', { status: url.endsWith('/gone') ? 410 : 201 });
+  }
   const docPrefix = `https://firestore.googleapis.com/v1/projects/${PROJECT}/databases/(default)/documents/`;
+  if (init.method === 'PATCH' && url.startsWith(docPrefix)) {
+    patches.push(decodeURIComponent(url.slice(docPrefix.length)));
+    return new Response('{}');
+  }
   if (url.endsWith(':batchGet')) {
     const { documents } = JSON.parse(init.body);
     return new Response(JSON.stringify(documents.map(name => {
@@ -98,7 +139,13 @@ globalThis.fetch = async (input, init = {}) => {
 };
 
 const { default: worker } = await import('../src/index.js');
-const env = { PROJECT_ID: PROJECT, FIREBASE_SERVICE_ACCOUNT: JSON.stringify({ client_email: 'sa@x', private_key: saPem }), ADMIN_SECRET: 's3cret' };
+const env = {
+  PROJECT_ID: PROJECT,
+  FIREBASE_SERVICE_ACCOUNT: JSON.stringify({ client_email: 'sa@x', private_key: saPem }),
+  ADMIN_SECRET: 's3cret',
+  VAPID_PUBLIC_KEY: vapidPublic,
+  VAPID_PRIVATE_KEY: vapidPrivate,
+};
 const call = async (path, { token, body, method = 'POST', envOverride = {}, headers = {} } = {}) => {
   const res = await worker.fetch(new Request(`https://w.dev${path}`, {
     method,
@@ -227,6 +274,50 @@ await test('other web pages may not', async () => {
   assert.equal(pre.status, 403);
   const r = await call('/ice', { method: 'GET', token: alice, headers: { Origin: 'https://evil.example' } });
   assert.equal(r.headers.get('access-control-allow-origin'), null);
+});
+await test('a message reaches the person\'s browser too, locked so only that browser can read it', async () => {
+  pushes.length = 0;
+  patches.length = 0;
+  const r = await call('/notify/message', { token: alice, body: { chatRoomId: 'r2', messageId: 'sec' } });
+  assert.equal(r.status, 200);
+  const live = pushes.find(p => p.url.endsWith('/carol'));
+  assert.ok(live, 'pushed to the browser');
+  assert.equal(live.headers['Content-Encoding'], 'aes128gcm');
+  assert.match(live.headers.Authorization, new RegExp(`^vapid t=[^,]+, k=${vapidPublic}$`));
+  const data = await unlockPush(live.body);
+  assert.deepEqual(data, { type: 'chat', id: 'r2', title: 'Alice', body: '🔒 New message', tag: 'chat:r2' });
+  assert.ok(!JSON.stringify(data).includes('SCRAMBLED'), 'no encrypted message contents in a browser push');
+});
+await test('a browser that unsubscribed is forgotten', async () => {
+  assert.ok(pushes.some(p => p.url.endsWith('/gone')));
+  assert.deepEqual(patches, ['users/carol/private/data?updateMask.fieldPaths=webPush.wdead']);
+});
+await test('a ringing call reaches the browser', async () => {
+  db['calls/c3'] = { id: 'c3', callerId: 'alice', callerName: 'Alice', receiverId: 'carol', status: 'ringing', type: 'video' };
+  pushes.length = 0;
+  await call('/notify/call', { token: alice, body: { callId: 'c3' } });
+  const data = await unlockPush(pushes.find(p => p.url.endsWith('/carol')).body);
+  assert.deepEqual(data, { type: 'call', id: 'c3', title: 'Alice', body: 'Incoming video call', tag: 'call:c3' });
+  assert.equal(pushes[0].headers.TTL, '40');
+});
+await test('a missed call shows in the browser; a declined one sends it nothing', async () => {
+  db['calls/c3'].status = 'missed';
+  pushes.length = 0;
+  await call('/notify/call-update', { token: alice, body: { callId: 'c3' } });
+  const data = await unlockPush(pushes.find(p => p.url.endsWith('/carol')).body);
+  assert.equal(data.type, 'missed');
+  assert.equal(data.title, 'Missed video call');
+  db['calls/c3'].status = 'rejected';
+  pushes.length = 0;
+  await call('/notify/call-update', { token: alice, body: { callId: 'c3' } });
+  assert.equal(pushes.length, 0);
+});
+await test('without VAPID keys, browsers are simply skipped', async () => {
+  pushes.length = 0;
+  db['calls/c3'].status = 'ringing';
+  const r = await call('/notify/call', { token: alice, body: { callId: 'c3' }, envOverride: { VAPID_PRIVATE_KEY: '' } });
+  assert.equal(r.status, 200);
+  assert.equal(pushes.length, 0);
 });
 await test('the service account token is reused, not re-signed every time', async () => assert.equal(oauthCalls, 1));
 

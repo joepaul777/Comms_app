@@ -52,7 +52,12 @@ class _ProfileScreenState extends State<ProfileScreen> {
   bool _notifications = false;
 
   Future<void> _askForNotifications() async {
-    final on = await NotificationService.instance.askPermission();
+    final service = NotificationService.instance;
+    if (service.isApplePhone && !service.isInstalled) {
+      showSnack(context, 'On iPhone, first add Comms to your Home Screen: tap Share, then "Add to Home Screen".');
+      return;
+    }
+    final on = await service.askPermission();
     if (!mounted) return;
     setState(() => _notifications = on);
     if (!on) showSnack(context, 'Notifications are blocked. Allow them from the icon next to the address bar.', error: true);
@@ -236,7 +241,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
                             _Row(
                               icon: Icons.notifications_active_rounded,
                               title: 'Notifications',
-                              value: _notifications ? 'On while Comms is open' : 'Off',
+                              value: _notifications ? 'On' : 'Off',
                               trailing: Switch(value: _notifications, onChanged: _notifications ? null : (_) => _askForNotifications()),
                               onTap: _notifications ? null : _askForNotifications,
                             )

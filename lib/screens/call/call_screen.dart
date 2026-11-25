@@ -3,6 +3,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
+import '../../platform/platform.dart';
 import '../../services/call_service.dart';
 import '../../theme/app_colors.dart';
 import '../../theme/app_theme.dart';
@@ -34,6 +35,9 @@ class _CallScreenState extends State<CallScreen> with TickerProviderStateMixin {
   int _localVersion = 0;
   String? _appliedSpeaker;
 
+  /// What was last told to the platform about the small floating window.
+  String _pipState = '';
+
   @override
   void initState() {
     super.initState();
@@ -47,12 +51,22 @@ class _CallScreenState extends State<CallScreen> with TickerProviderStateMixin {
       // Redraw when a picture's size or turn changes, so it is fitted the right way.
       _local.addListener(_redraw);
       _remote.addListener(_redraw);
+      inPictureInPicture.addListener(_redraw);
       _onChange();
     });
   }
 
   void _onChange() {
     if (!mounted) return;
+    if (_calls.phase == CallPhase.ended || _calls.phase == CallPhase.idle) {
+      if (_pipState != 'off') {
+        _pipState = 'off';
+        setPictureInPictureReady(false);
+      }
+      if (inPictureInPicture.value) closePictureInPicture();
+    } else {
+      _syncPictureInPicture();
+    }
     if (_calls.phase == CallPhase.idle) {
       if (!_popped) {
         _popped = true;
@@ -83,11 +97,45 @@ class _CallScreenState extends State<CallScreen> with TickerProviderStateMixin {
   }
 
   void _redraw() {
-    if (mounted) setState(() {});
+    if (!mounted) return;
+    _syncPictureInPicture();
+    setState(() {});
+  }
+
+  /// A live video call can go into a small floating window when the person goes home
+  /// (phone) or switches tab (browser), shaped like the other person's picture: wide
+  /// from a laptop, tall from a phone.
+  bool get _canPopOut {
+    final call = _calls.call;
+    return call != null && call.isVideo && _calls.phase == CallPhase.connected && _calls.remoteStream != null;
+  }
+
+  (int, int) get _theirShape {
+    final v = _remote.value;
+    if (v.width == 0 || v.height == 0) return (9, 16);
+    final ratio = v.aspectRatio;
+    return ratio >= 1 ? ((ratio * 1000).round(), 1000) : (1000, (1000 / ratio).round());
+  }
+
+  void _syncPictureInPicture() {
+    final ready = _canPopOut;
+    final (w, h) = _theirShape;
+    final state = ready ? '$w:$h' : 'off';
+    if (state == _pipState) return;
+    _pipState = state;
+    setPictureInPictureReady(ready, width: w, height: h, streamId: _calls.remoteStream?.id);
+  }
+
+  Future<void> _popOut() async {
+    if (!_canPopOut) return;
+    final ok = await enterPictureInPicture(streamId: _calls.remoteStream?.id);
+    if (!ok && mounted) showSnack(context, 'Your device can\'t show the call in a small window', error: true);
   }
 
   @override
   void dispose() {
+    inPictureInPicture.removeListener(_redraw);
+    setPictureInPictureReady(false);
     _local.removeListener(_redraw);
     _remote.removeListener(_redraw);
     _calls.removeListener(_onChange);
@@ -134,8 +182,22 @@ class _CallScreenState extends State<CallScreen> with TickerProviderStateMixin {
         (_calls.localStream?.getVideoTracks().isNotEmpty ?? false) &&
         _calls.phase != CallPhase.ended;
 
+    // In the phone's small floating window: just their picture (or photo).
+    if (inPictureInPicture.value && !kIsWeb) {
+      return Scaffold(
+        backgroundColor: Colors.black,
+        body: videoLive
+            ? RTCVideoView(_remote, objectFit: RTCVideoViewObjectFit.RTCVideoViewObjectFitCover)
+            : Center(child: PersonAvatar(uid: call.otherId(_calls.myUid), name: name, fallbackPhoto: photo, size: 72)),
+      );
+    }
+
     return PopScope(
       canPop: _calls.phase == CallPhase.idle || _calls.phase == CallPhase.ended,
+      // Back during a video call: keep it going in a small floating window.
+      onPopInvokedWithResult: (didPop, _) {
+        if (!didPop && _canPopOut) _popOut();
+      },
       child: Scaffold(
         backgroundColor: Colors.black,
         body: GestureDetector(
@@ -230,6 +292,27 @@ class _CallScreenState extends State<CallScreen> with TickerProviderStateMixin {
                             icon: Icons.tune_rounded,
                             size: 44,
                             onTap: _openSettings,
+                            background: Colors.black.withValues(alpha: 0.45),
+                            foreground: AppColors.text,
+                          ),
+                        ),
+                      ),
+                    ),
+                  // Pop the video call out into a small floating window.
+                  if (_canPopOut)
+                    Positioned(
+                      top: MediaQuery.paddingOf(context).top + 12,
+                      left: 66,
+                      child: AnimatedOpacity(
+                        opacity: _controlsVisible || !videoLive ? 1 : 0,
+                        duration: const Duration(milliseconds: 250),
+                        child: Semantics(
+                          button: true,
+                          label: 'Pop out',
+                          child: CircleIconButton(
+                            icon: Icons.picture_in_picture_alt_rounded,
+                            size: 44,
+                            onTap: _popOut,
                             background: Colors.black.withValues(alpha: 0.45),
                             foreground: AppColors.text,
                           ),

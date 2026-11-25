@@ -12,6 +12,7 @@
 // Vars (wrangler.toml): PROJECT_ID, METERED_DOMAIN
 
 import { decodeDocument, verifyIdToken, serviceAccountToken } from './google.js';
+import { sendWebPush } from './webpush.js';
 
 const json = (body, status = 200) =>
   new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
@@ -165,13 +166,54 @@ async function batchGet(env, paths) {
  * kept it on the public profile.
  */
 async function getTokens(env, uids) {
+  return (await getAddresses(env, uids)).tokens;
+}
+
+/**
+ * Where to reach each person: their phone (FCM token) and any browsers with Comms
+ * Web notifications on (web push subscriptions, kept in the same private document).
+ */
+async function getAddresses(env, uids) {
   const docs = await batchGet(env, uids.flatMap(uid => [`users/${uid}`, `users/${uid}/private/data`]));
   const tokens = new Map();
+  const browsers = new Map();
   for (const uid of uids) {
-    const token = docs.get(`users/${uid}/private/data`)?.fcmToken || docs.get(`users/${uid}`)?.fcmToken;
+    const priv = docs.get(`users/${uid}/private/data`);
+    const token = priv?.fcmToken || docs.get(`users/${uid}`)?.fcmToken;
     if (token) tokens.set(uid, token);
+    const subs = Object.entries(priv?.webPush || {})
+      .filter(([, sub]) => sub && typeof sub.endpoint === 'string' && sub.endpoint.startsWith('https://') && sub.p256dh && sub.auth)
+      .map(([id, sub]) => ({ id, endpoint: sub.endpoint, p256dh: sub.p256dh, auth: sub.auth }));
+    if (subs.length) browsers.set(uid, subs);
   }
-  return tokens;
+  return { tokens, browsers };
+}
+
+function vapidKeys(env) {
+  if (!env.VAPID_PUBLIC_KEY || !env.VAPID_PRIVATE_KEY) return null;
+  return { publicKey: env.VAPID_PUBLIC_KEY, privateKey: env.VAPID_PRIVATE_KEY, subject: 'https://jp-comms.web.app' };
+}
+
+/** Sends a notification to each of [uid]'s browsers, forgetting ones that unsubscribed. */
+async function notifyBrowsers(env, uid, subs, data, options) {
+  const vapid = vapidKeys(env);
+  if (!vapid || !subs?.length) return 0;
+  let sent = 0;
+  await Promise.all(subs.map(async sub => {
+    const result = await sendWebPush(sub, data, vapid, options);
+    if (result === 'sent') sent++;
+    if (result === 'gone') await forgetBrowser(env, uid, sub.id).catch(e => console.warn('forget browser', e.message));
+  }));
+  return sent;
+}
+
+async function forgetBrowser(env, uid, id) {
+  if (!/^w[0-9a-f]{1,32}$/.test(id)) return;
+  await fetch(`${docUrl(env, `users/${uid}/private/data`)}?updateMask.fieldPaths=webPush.${id}`, {
+    method: 'PATCH',
+    headers: { Authorization: `Bearer ${await googleToken(env)}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ fields: {} }),
+  });
 }
 
 /** Sends one FCM message. Returns false when the device token is no longer valid. */
@@ -217,7 +259,7 @@ async function notifyMessage(env, uid, { chatRoomId, messageId }) {
   if (Date.now() - Number(message.timestamp || 0) > 2 * 60 * 1000) return json({ sent: 0 });
 
   const recipients = (room.participants || []).filter(id => id !== uid);
-  const tokens = await getTokens(env, recipients);
+  const { tokens, browsers } = await getAddresses(env, recipients);
   const isGroup = room.type === 'group';
   const enc = message.enc && typeof message.enc === 'object' ? message.enc : null;
   // Encrypted messages: this server can't read the words, so it only says what kind of
@@ -250,6 +292,13 @@ async function notifyMessage(env, uid, { chatRoomId, messageId }) {
     await sendFcm(env, dataMessage(token, data, 3600));
     sent++;
   }));
+  // Browsers: the words are end-to-end encrypted and a browser's background worker
+  // can't unlock them, so the notification says who wrote and what kind of message.
+  const title = isGroup ? room.groupName || 'Group' : message.senderName || 'New message';
+  const body = isGroup ? `${message.senderName}: ${preview}` : preview;
+  await Promise.all([...browsers].map(async ([recipient, subs]) => {
+    sent += await notifyBrowsers(env, recipient, subs, { type: 'chat', id: chatRoomId, title, body, tag: `chat:${chatRoomId}` });
+  }));
   return json({ sent });
 }
 
@@ -260,17 +309,28 @@ async function notifyCall(env, uid, { callId }) {
   if (call.callerId !== uid) return json({ error: 'forbidden' }, 403);
   if (call.status !== 'ringing') return json({ sent: 0 });
 
-  const token = (await getTokens(env, [call.receiverId])).get(call.receiverId);
-  if (!token) return json({ sent: 0 });
-  await sendFcm(env, dataMessage(token, {
+  const { tokens, browsers } = await getAddresses(env, [call.receiverId]);
+  const token = tokens.get(call.receiverId);
+  let sent = 0;
+  if (token) {
+    await sendFcm(env, dataMessage(token, {
+      type: 'call',
+      id: callId,
+      callerName: call.callerName,
+      callerId: call.callerId,
+      isVideo: call.type === 'video',
+      sentAt: Date.now(),
+    }, 40));
+    sent++;
+  }
+  sent += await notifyBrowsers(env, call.receiverId, browsers.get(call.receiverId), {
     type: 'call',
     id: callId,
-    callerName: call.callerName,
-    callerId: call.callerId,
-    isVideo: call.type === 'video',
-    sentAt: Date.now(),
-  }, 40));
-  return json({ sent: 1 });
+    title: call.callerName || 'Someone',
+    body: call.type === 'video' ? 'Incoming video call' : 'Incoming voice call',
+    tag: `call:${callId}`,
+  }, { ttl: 40 });
+  return json({ sent });
 }
 
 // Tells the other person's phone that a call was declined, cancelled or ended,
@@ -282,8 +342,20 @@ async function notifyCallUpdate(env, uid, { callId }) {
   if (uid !== call.callerId && uid !== call.receiverId) return json({ error: 'forbidden' }, 403);
 
   const otherId = uid === call.callerId ? call.receiverId : call.callerId;
-  const token = (await getTokens(env, [otherId])).get(otherId);
-  if (!token) return json({ sent: 0 });
+  const { tokens, browsers } = await getAddresses(env, [otherId]);
+  const token = tokens.get(otherId);
+  const missed = uid === call.callerId && call.status === 'missed';
+  let browserSent = 0;
+  if (missed) {
+    browserSent = await notifyBrowsers(env, otherId, browsers.get(otherId), {
+      type: 'missed',
+      id: callId,
+      title: `Missed ${call.type === 'video' ? 'video' : 'voice'} call`,
+      body: call.callerName || 'Someone',
+      tag: `call:${callId}`,
+    }, { ttl: 3600, urgency: 'normal' });
+  }
+  if (!token) return json({ sent: browserSent });
   await sendFcm(env, dataMessage(token, {
     type: 'call_update',
     id: callId,
@@ -292,9 +364,9 @@ async function notifyCallUpdate(env, uid, { callId }) {
     callerName: call.callerName,
     callerId: call.callerId,
     isVideo: call.type === 'video',
-    missed: uid === call.callerId && call.status === 'missed',
+    missed,
   }, 600));
-  return json({ sent: 1 });
+  return json({ sent: 1 + browserSent });
 }
 
 // The newest release, read by the app's "Update" button. Change these in wrangler.toml.

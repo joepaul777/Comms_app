@@ -1,9 +1,11 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:js_interop';
+import 'dart:js_interop_unsafe';
 import 'dart:typed_data';
 import 'package:audioplayers/audioplayers.dart';
 import 'package:cross_file/cross_file.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/widgets.dart';
 import 'package:video_player/video_player.dart';
 import 'package:web/web.dart' as web;
@@ -303,3 +305,88 @@ String get deviceName {
 }
 
 void reloadApp() => web.window.location.reload();
+
+// ---- Picture-in-picture (video calls) ------------------------------------------
+//
+// In a browser the "small window" is the browser's own picture-in-picture for the
+// other person's video, which takes the video's shape by itself (wide from a laptop,
+// tall from a phone).
+
+final ValueNotifier<bool> _inPip = ValueNotifier(false);
+
+ValueListenable<bool> get inPictureInPicture => _inPip;
+
+/// The <video> showing the other person: the one playing stream [streamId], or else
+/// the largest one on screen (your own picture is the small corner one).
+web.HTMLVideoElement? _videoFor(String? streamId) {
+  final videos = web.document.querySelectorAll('video');
+  web.HTMLVideoElement? largest;
+  var largestArea = 0.0;
+  for (var i = 0; i < videos.length; i++) {
+    final node = videos.item(i);
+    if (node == null || !node.isA<web.HTMLVideoElement>()) continue;
+    final video = node as web.HTMLVideoElement;
+    final src = video.srcObject;
+    if (streamId != null && src != null && src.isA<web.MediaStream>()) {
+      final stream = src as web.MediaStream;
+      if (stream.id == streamId) return video;
+    }
+    final box = video.getBoundingClientRect();
+    final area = box.width * box.height;
+    if (area > largestArea) {
+      largestArea = area;
+      largest = video;
+    }
+  }
+  return largest;
+}
+
+Future<void> setPictureInPictureReady(bool ready, {int width = 9, int height = 16, String? streamId}) async {
+  try {
+    final session = web.window.navigator.mediaSession;
+    if (ready) {
+      // Chrome: switching to another tab or app pops the call out on its own.
+      session.setActionHandler('enterpictureinpicture', (() {
+        enterPictureInPicture(streamId: streamId);
+      }).toJS);
+    } else {
+      session.setActionHandler('enterpictureinpicture', null);
+    }
+  } catch (_) {}
+  // Safari (iPhone): leaving the app takes the video along in a small window.
+  final video = _videoFor(streamId);
+  if (video != null) {
+    try {
+      video.setAttribute('autopictureinpicture', '');
+      (video as JSObject).setProperty('autoPictureInPicture'.toJS, ready.toJS);
+    } catch (_) {}
+    video.onenterpictureinpicture = ((web.Event _) => _inPip.value = true).toJS;
+    video.onleavepictureinpicture = ((web.Event _) => _inPip.value = false).toJS;
+  }
+}
+
+Future<bool> enterPictureInPicture({String? streamId}) async {
+  final video = _videoFor(streamId);
+  if (video == null) return false;
+  try {
+    if ((web.document as JSObject).has('pictureInPictureEnabled')) {
+      await video.requestPictureInPicture().toDart;
+      return true;
+    }
+    // Older Safari.
+    if ((video as JSObject).has('webkitSetPresentationMode')) {
+      (video as JSObject).callMethod('webkitSetPresentationMode'.toJS, 'picture-in-picture'.toJS);
+      return true;
+    }
+  } catch (e) {
+    debugPrint('picture-in-picture refused: $e');
+  }
+  return false;
+}
+
+Future<void> closePictureInPicture() async {
+  try {
+    if (web.document.pictureInPictureElement != null) await web.document.exitPictureInPicture().toDart;
+  } catch (_) {}
+  _inPip.value = false;
+}
