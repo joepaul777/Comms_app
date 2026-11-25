@@ -9,7 +9,7 @@ METERED_DOMAIN = "joepaul.metered.live"
 
 # The newest Comms release. Raise LATEST_BUILD (it must match the "+number" in
 # pubspec.yaml) and redeploy, and every phone on an older build is offered the update.
-LATEST_VERSION = "2.2.4"
-LATEST_BUILD = "5010"
+LATEST_VERSION = "2.2.5"
+LATEST_BUILD = "5011"
 DOWNLOAD_URL = "https://joepaul.vercel.app/downloads/Comms.apk"
-RELEASE_NOTES = "Better video calls: a phone held upright now shows in full on a computer instead of zoomed in, your own picture snaps to a corner when you drag it, and turning your camera off shows your photo instead of a black screen. Bluetooth earbuds also go back to normal as soon as a call ends."
+RELEASE_NOTES = "Clearer calls: voices now sound fuller and hold up better on weak connections, with noise reduction that really works on Android. New call settings button (top left during a call) to switch microphone, sound output and noise reduction mid-call."
