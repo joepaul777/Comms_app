@@ -1,7 +1,7 @@
 name: comms
 description: "Comms - Stay connected with your people"
 publish_to: 'none'
-version: 2.2.6+3012
+version: 3.0.0+3014
 
 environment:
   sdk: ^3.12.2
@@ -50,6 +50,10 @@ dependencies:
   cryptography: ^2.9.0
   cryptography_flutter: ^2.3.4
   flutter_secure_storage: ^11.2.0
+
+  # Ringer and Do Not Disturb check for walkie-talkie (works with the app closed)
+  comms_device:
+    path: packages/comms_device
 
   # Web version
   web: ^1.1.1

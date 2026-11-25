@@ -16,6 +16,9 @@ class UserModel {
   /// Their phone's public encryption key (see E2E). Null on old versions of Comms.
   final String? publicKey;
 
+  /// Lets people talk to them by walkie-talkie (played out loud on their phone).
+  final bool walkieTalkie;
+
   // Sending limits (written together with each message or call, checked by the database)
   final Timestamp? lastMessageAt;
   final Timestamp? msgWindowStart;
@@ -35,6 +38,7 @@ class UserModel {
     DateTime? createdAt,
     this.busyUntil,
     this.publicKey,
+    this.walkieTalkie = false,
     this.lastMessageAt,
     this.msgWindowStart,
     this.msgWindowCount = 0,
@@ -73,6 +77,7 @@ class UserModel {
       createdAt: millis(map['createdAt']),
       busyUntil: millis(map['busyUntil']),
       publicKey: map['publicKey'] is String && (map['publicKey'] as String).isNotEmpty ? map['publicKey'] as String : null,
+      walkieTalkie: map['walkieTalkie'] == true,
       lastMessageAt: map['lastMessageAt'] is Timestamp ? map['lastMessageAt'] : null,
       msgWindowStart: map['msgWindowStart'] is Timestamp ? map['msgWindowStart'] : null,
       msgWindowCount: (map['msgWindowCount'] as num?)?.toInt() ?? 0,
@@ -94,6 +99,7 @@ class UserModel {
         createdAt: createdAt,
         busyUntil: busyUntil,
         publicKey: publicKey,
+        walkieTalkie: walkieTalkie,
         lastMessageAt: lastMessageAt,
         msgWindowStart: msgWindowStart,
         msgWindowCount: msgWindowCount,

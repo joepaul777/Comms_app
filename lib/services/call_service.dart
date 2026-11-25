@@ -73,6 +73,9 @@ class CallService extends ChangeNotifier {
   /// is shown instead of a black screen).
   bool remoteCameraOff = false;
 
+  /// The other person muted their microphone.
+  bool remoteMuted = false;
+
   RTCPeerConnection? _pc;
   StreamSubscription? _callSub;
   StreamSubscription? _candidateSub;
@@ -336,8 +339,10 @@ class CallService extends ChangeNotifier {
 
       final otherId = isCaller ? latest.receiverId : latest.callerId;
       final theirCameraOff = (data['videoOff'] as Map?)?[otherId] == true;
-      if (theirCameraOff != remoteCameraOff) {
+      final theyMuted = (data['micOff'] as Map?)?[otherId] == true;
+      if (theirCameraOff != remoteCameraOff || theyMuted != remoteMuted) {
         remoteCameraOff = theirCameraOff;
+        remoteMuted = theyMuted;
         notifyListeners();
       }
 
@@ -584,6 +589,13 @@ class CallService extends ChangeNotifier {
       t.enabled = !muted;
     }
     notifyListeners();
+    // Let the other side show that this person muted themselves.
+    final current = call;
+    if (current != null && myUid.isNotEmpty) {
+      _db.collection('calls').doc(current.id).update({'micOff.$myUid': muted}).catchError((e) {
+        debugPrint('mute state not sent: $e');
+      });
+    }
   }
 
   // ---------------------------------------------------------------------------
@@ -945,6 +957,7 @@ class CallService extends ChangeNotifier {
     connectedAt = null;
     mediaNote = null;
     remoteCameraOff = false;
+    remoteMuted = false;
     audioOutput = 'earpiece';
     audioOutputs = const [];
     _remoteDescriptionSet = false;

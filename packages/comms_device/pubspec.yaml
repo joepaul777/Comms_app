@@ -1,0 +1,19 @@
+name: comms_device
+description: Small device checks Comms needs, also while the app is closed.
+version: 1.0.0
+publish_to: 'none'
+
+environment:
+  sdk: ^3.0.0
+  flutter: '>=3.10.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+flutter:
+  plugin:
+    platforms:
+      android:
+        package: com.comms.device
+        pluginClass: CommsDevicePlugin

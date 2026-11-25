@@ -78,6 +78,10 @@ Future<void> main() async {
         await calls.hangUp();
         return 'ok';
       })).toJS);
+  _hook('commsToggleMute', (() => _guard(() async {
+        calls.toggleMute();
+        return 'ok';
+      })).toJS);
   _hook('commsToggleCamera', (() => _guard(() async {
         calls.toggleCamera();
         return 'ok';
@@ -109,6 +113,7 @@ Future<void> main() async {
         'message': calls.endMessage,
         'status': calls.call?.status.name,
         'note': calls.mediaNote,
+        'theyMuted': calls.remoteMuted,
         'local': calls.localStream?.getTracks().map((t) => t.kind).toList(),
         'remote': calls.remoteStream?.getTracks().map((t) => t.kind).toList(),
       }).toJS).toJS);

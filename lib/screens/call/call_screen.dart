@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:math' as math;
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -371,10 +372,22 @@ class _CallScreenState extends State<CallScreen> with TickerProviderStateMixin {
     final size = aspect < 1 ? Size(longSide * aspect, longSide) : Size(longSide, longSide / aspect);
     final pad = MediaQuery.paddingOf(context);
     const margin = 14.0;
-    final top = pad.top + margin + (videoLive ? 64 : 0);
-    // Above the buttons along the bottom.
-    final bottom = screen.height - size.height - pad.bottom - 128;
-    Offset cornerSpot(Alignment c) => Offset(c.x < 0 ? margin : screen.width - size.width - margin, c.y < 0 ? top : bottom.clamp(top, screen.height));
+    final buttonsShowing = _controlsVisible || !videoLive;
+    // Right in the corners, only moving aside for buttons while they are showing: the
+    // settings buttons at the top left, and the call buttons along the bottom when
+    // they reach that far.
+    Offset cornerSpot(Alignment c) {
+      final x = c.x < 0 ? margin : screen.width - size.width - margin;
+      if (c.y < 0) {
+        final underButtons = c.x < 0 && buttonsShowing && _calls.phase != CallPhase.incoming;
+        return Offset(x, pad.top + margin + (underButtons ? 54 : 0));
+      }
+      final barWidth = math.min(screen.width - 40, 460.0);
+      final barLeft = (screen.width - barWidth) / 2;
+      final overBar = x < barLeft + barWidth && x + size.width > barLeft;
+      final lift = buttonsShowing && overBar ? 124.0 : margin;
+      return Offset(x, math.max(pad.top + margin, screen.height - size.height - pad.bottom - lift));
+    }
     final spot = _pipDrag ?? cornerSpot(_pipCorner);
 
     return AnimatedPositioned(
@@ -417,7 +430,7 @@ class _CallScreenState extends State<CallScreen> with TickerProviderStateMixin {
 
   Widget _statusText({double size = 16}) {
     final ended = _calls.phase == CallPhase.ended;
-    return AnimatedSwitcher(
+    final status = AnimatedSwitcher(
       duration: const Duration(milliseconds: 250),
       child: Text(
         _status(),
@@ -425,6 +438,25 @@ class _CallScreenState extends State<CallScreen> with TickerProviderStateMixin {
         textAlign: TextAlign.center,
         style: AppTheme.body(size, weight: ended ? FontWeight.w700 : FontWeight.w500, color: ended ? AppColors.primary : AppColors.textMuted),
       ),
+    );
+    if (!_calls.remoteMuted || _calls.phase != CallPhase.connected) return status;
+    // They switched their microphone off.
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        status,
+        Padding(
+          padding: const EdgeInsets.only(top: 4),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(Icons.mic_off_rounded, size: size, color: AppColors.error),
+              const SizedBox(width: 4),
+              Text('Muted', style: AppTheme.body(size - 1, weight: FontWeight.w600, color: AppColors.error)),
+            ],
+          ),
+        ),
+      ],
     );
   }
 
@@ -571,6 +603,19 @@ class _CallScreenState extends State<CallScreen> with TickerProviderStateMixin {
                     subtitle: const Text('Filters out background noise so your voice comes through clearly'),
                   ),
                   _settingsHeading('Microphone'),
+                  // A phone only hears through a headset once its call connection is on,
+                  // so a connected headset is offered here even before Android lists its
+                  // microphone. Choosing it uses the headset for listening and speaking.
+                  for (final headset in [
+                    if (!kIsWeb && _calls.audioOutputs.contains('bluetooth')) 'bluetooth',
+                    if (!kIsWeb && _calls.audioOutputs.contains('wired-headset')) 'wired-headset',
+                  ])
+                    _choice(
+                      icon: headset == 'bluetooth' ? Icons.bluetooth_audio_rounded : Icons.headset_mic_rounded,
+                      label: headset == 'bluetooth' ? 'Bluetooth headset' : 'Headphones',
+                      selected: _calls.audioOutput == headset,
+                      onTap: () => _calls.selectAudioOutput(headset),
+                    ),
                   if (_calls.microphones.isEmpty)
                     _settingsNote('No microphone found')
                   else
@@ -578,8 +623,15 @@ class _CallScreenState extends State<CallScreen> with TickerProviderStateMixin {
                       _choice(
                         icon: Icons.mic_rounded,
                         label: _deviceLabel(mic.label, 'Microphone'),
-                        selected: mic.deviceId == _calls.microphoneId || (_calls.microphoneId == null && mic == _calls.microphones.first),
-                        onTap: () => _calls.selectMicrophone(mic.deviceId),
+                        selected: (kIsWeb || (_calls.audioOutput != 'bluetooth' && _calls.audioOutput != 'wired-headset')) &&
+                            (mic.deviceId == _calls.microphoneId || (_calls.microphoneId == null && mic == _calls.microphones.first)),
+                        onTap: () async {
+                          // The phone's own microphone: stop using the headset for the call.
+                          if (!kIsWeb && (_calls.audioOutput == 'bluetooth' || _calls.audioOutput == 'wired-headset')) {
+                            await _calls.selectAudioOutput(_calls.call?.isVideo == true ? 'speaker' : 'earpiece');
+                          }
+                          await _calls.selectMicrophone(mic.deviceId);
+                        },
                       ),
                   _settingsHeading('Sound'),
                   if (kIsWeb)

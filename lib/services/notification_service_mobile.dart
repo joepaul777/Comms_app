@@ -17,6 +17,8 @@ import 'e2e_service.dart';
 import 'media_service.dart';
 import 'push_api.dart';
 import 'local_prefs.dart';
+import 'walkie_service.dart';
+import 'call_service.dart';
 import 'notification_tap.dart';
 
 export 'notification_tap.dart';
@@ -106,6 +108,9 @@ Future<(Map<String, dynamic>, List<int>?)> _unlockChat(Map<String, dynamic> data
         ...data,
         if (text.isNotEmpty) 'body': isGroup ? '${data['senderName'] ?? ''}: $text' : text,
         if (text.isNotEmpty) 'msgText': text,
+        if (p['w'] == 1) 'walkie': 'true',
+        if (p['w'] == 1) 'body': isGroup ? '${data['senderName'] ?? ''}: 📻 Walkie-talkie' : '📻 Walkie-talkie',
+        if (p['w'] == 1) 'msgText': '📻 Walkie-talkie',
         'mediaUrl': p['u'] ?? '',
         'mediaName': p['m'] ?? '',
       },
@@ -319,13 +324,15 @@ Future<void> firebaseMessagingBackgroundHandler(RemoteMessage message) async {
       final (unlocked, key) = await _unlockChat(data);
       await _showChat(unlocked);
       // Save the photo, video or voice note now, while the link still works.
-      await MediaService.prefetch(
+      final file = await MediaService.prefetch(
         url: unlocked['mediaUrl'] ?? '',
         messageId: unlocked['messageId'] ?? '',
         name: unlocked['mediaName'] ?? '',
         type: unlocked['mediaType'] ?? '',
         key: key,
       );
+      // Walkie-talkie: play it out loud now (if allowed and the phone isn't silenced).
+      if (file != null && unlocked['walkie'] == 'true') await Walkie.playIfAllowed(file);
       break;
     case 'call':
       final sentAt = int.tryParse(data['sentAt'] ?? '') ?? 0;
@@ -405,13 +412,16 @@ class NotificationService {
       _showChat(data);
       if (looking) onForegroundChat?.call(data);
     }
-    MediaService.prefetch(
+    final file = await MediaService.prefetch(
       url: data['mediaUrl'] ?? '',
       messageId: messageId,
       name: data['mediaName'] ?? '',
       type: data['mediaType'] ?? '',
       key: key,
     );
+    if (file != null && data['walkie'] == 'true') {
+      await Walkie.playIfAllowed(file, inCall: CallService.instance.isActive);
+    }
   }
 
   Future<void> initialize() async {

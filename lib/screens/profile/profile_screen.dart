@@ -11,6 +11,7 @@ import '../../services/auth_service.dart';
 import '../../services/notification_service.dart';
 import '../../services/update_service.dart';
 import '../../services/user_service.dart';
+import '../../services/walkie_service.dart';
 import '../../theme/app_colors.dart';
 import '../../theme/app_theme.dart';
 import '../../widgets/avatar.dart';
@@ -42,6 +43,11 @@ class _ProfileScreenState extends State<ProfileScreen> {
     UpdateService.newerRelease().then((r) {
       if (mounted && r != null) setState(() => _updateWaiting = true);
     });
+    if (!kIsWeb) {
+      Walkie.enabled().then((on) {
+        if (mounted) setState(() => _walkie = on);
+      });
+    }
     if (kIsWeb) {
       NotificationService.instance.permitted().then((on) {
         if (mounted) setState(() => _notifications = on);
@@ -50,6 +56,20 @@ class _ProfileScreenState extends State<ProfileScreen> {
   }
 
   bool _notifications = false;
+  bool _walkie = false;
+
+  Future<void> _toggleWalkie(bool on) async {
+    setState(() => _walkie = on);
+    try {
+      await Walkie.setEnabled(widget.me.uid, on);
+      if (mounted && on) showSnack(context, 'People can now talk to you by holding your chat. Silent mode keeps it quiet.');
+    } catch (_) {
+      if (mounted) {
+        setState(() => _walkie = !on);
+        showSnack(context, 'Could not change walkie-talkie. Check your connection.', error: true);
+      }
+    }
+  }
 
   Future<void> _askForNotifications() async {
     final service = NotificationService.instance;
@@ -263,6 +283,26 @@ class _ProfileScreenState extends State<ProfileScreen> {
                             trailing: SizedBox.shrink(),
                           ),
                         ]),
+                        if (!kIsWeb) ...[
+                          const SizedBox(height: 14),
+                          _Group(children: [
+                            _Row(
+                              icon: Icons.settings_voice_rounded,
+                              title: 'Walkie-talkie',
+                              value: _walkie ? 'On' : 'Off',
+                              trailing: Switch(value: _walkie, onChanged: _toggleWalkie),
+                              onTap: () => _toggleWalkie(!_walkie),
+                            ),
+                          ]),
+                          Padding(
+                            padding: const EdgeInsets.fromLTRB(16, 8, 16, 0),
+                            child: Text(
+                              'When on, people can hold your chat and talk: it plays out loud through your speaker or headphones. '
+                              'Stays quiet while your phone is on silent, vibrate or Do Not Disturb.',
+                              style: AppTheme.body(12.5, color: AppColors.textFaint, height: 1.45),
+                            ),
+                          ),
+                        ],
                         if (!kIsWeb) const SizedBox(height: 14),
                         if (!kIsWeb)
                         _Group(children: [

@@ -148,6 +148,11 @@ try {
     await bob.waitFor(connectedWith(['audio']), 'connected with audio');
     await sleep(3000);
     await alice.waitFor(phase('connected'), 'still connected');
+    // Muting shows on the other side, and unmuting clears it.
+    await alice.run('commsToggleMute()');
+    await bob.waitFor(s => s.theyMuted === true, 'seeing alice muted', 8000);
+    await alice.run('commsToggleMute()');
+    await bob.waitFor(s => s.theyMuted === false, 'seeing alice unmuted', 8000);
     // Mid-call: another microphone, noise reduction off and on, another speaker.
     const devices = JSON.parse(await alice.run('commsDevices()'));
     const before = await alice.state();

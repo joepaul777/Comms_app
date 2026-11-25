@@ -76,7 +76,7 @@ class _AudioMessageState extends State<AudioMessage> {
         final expired = state.expired;
         final total = _duration ?? Duration.zero;
         final fraction = total.inMilliseconds == 0 ? 0.0 : (_position.inMilliseconds / total.inMilliseconds).clamp(0.0, 1.0);
-        return SizedBox(
+        final player = SizedBox(
           width: 230,
           child: Row(
             children: [
@@ -128,6 +128,25 @@ class _AudioMessageState extends State<AudioMessage> {
               ),
             ],
           ),
+        );
+        if (!widget.message.walkie) return player;
+        return Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Padding(
+              padding: const EdgeInsets.only(left: 4, bottom: 4),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(Icons.settings_voice_rounded, size: 13, color: fg.withValues(alpha: 0.75)),
+                  const SizedBox(width: 4),
+                  Text('Walkie-talkie', style: AppTheme.body(11.5, weight: FontWeight.w700, color: fg.withValues(alpha: 0.75))),
+                ],
+              ),
+            ),
+            player,
+          ],
         );
       },
     );

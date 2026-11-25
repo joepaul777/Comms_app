@@ -229,12 +229,13 @@ class MediaService {
   }
 
   /// Used by the notification handler, which runs without the rest of the app.
-  static Future<void> prefetch({required String url, required String messageId, required String name, required String type, List<int>? key}) async {
-    if (url.isEmpty) return;
+  /// Returns this phone's copy, or null if it couldn't be fetched.
+  static Future<File?> prefetch({required String url, required String messageId, required String name, required String type, List<int>? key}) async {
+    if (url.isEmpty) return null;
     final messageType = MessageType.values.firstWhere((t) => t.name == type, orElse: () => MessageType.image);
     final dir = await mediaDirectory();
     final target = File('${dir.path}/$messageId.${extensionOf(name, messageType)}');
-    if (await target.exists()) return;
-    await MediaService.instance.fetchTo(url, target, key: key);
+    if (await target.exists()) return target;
+    return MediaService.instance.fetchTo(url, target, key: key);
   }
 }

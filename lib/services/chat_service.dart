@@ -205,6 +205,7 @@ class ChatService {
     int? viewLimit,
     MessageModel? replyTo,
     List<int>? contentKey,
+    bool walkie = false,
   }) async {
     if (type != MessageType.system) _gate.check();
     final replyText = replyTo == null ? null : previewFor(replyTo.type, replyTo.text);
@@ -226,7 +227,11 @@ class ChatService {
     );
 
     var stored = message.toMap();
-    var preview = viewLimit != null ? (type == MessageType.video ? '🎥 View-once video' : '📷 View-once photo') : previewFor(type, text);
+    var preview = viewLimit != null
+        ? (type == MessageType.video ? '🎥 View-once video' : '📷 View-once photo')
+        : walkie
+            ? '📻 Walkie-talkie'
+            : previewFor(type, text);
     Map<String, dynamic>? lastEnc;
     if (type != MessageType.system) {
       // Only the people in the chat can read what is in it; the database just holds scrambled bytes.
@@ -237,6 +242,7 @@ class ChatService {
         mediaName: mediaName,
         replyToText: replyText,
         replyToSenderName: replyTo?.senderName,
+        walkie: walkie,
       );
       final enc = await E2E.instance.seal(contents, keys, aad: E2E.messageAad(room.id, message.id), contentKey: contentKey);
       stored = {

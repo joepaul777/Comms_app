@@ -139,7 +139,7 @@ class _LoginScreenState extends State<LoginScreen> with TickerProviderStateMixin
                         ),
                       ),
                       const SizedBox(height: 16),
-                      _reveal(0.65, Center(child: Text('Version 2.2', style: AppTheme.body(12.5, color: AppColors.textFaint)))),
+                      _reveal(0.65, Center(child: Text('Version 3.0', style: AppTheme.body(12.5, color: AppColors.textFaint)))),
                     ],
                   ),
                 ),

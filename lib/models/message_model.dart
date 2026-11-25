@@ -43,6 +43,10 @@ class MessageModel {
   /// Encrypted, but this phone can't unlock it (it was sent to another phone of yours).
   final bool locked;
 
+  /// A walkie-talkie voice message: played out loud on arrival for people who allow it.
+  /// The flag travels inside the encrypted contents.
+  final bool walkie;
+
   MessageModel({
     required this.id,
     required this.senderId,
@@ -67,6 +71,7 @@ class MessageModel {
     this.enc,
     this.contentKey,
     this.locked = false,
+    this.walkie = false,
   });
 
   static const lockedText = "🔒 This message can't be read on this phone";
@@ -102,11 +107,21 @@ class MessageModel {
       enc: enc,
       contentKey: key,
       locked: !ok,
+      walkie: ok && payload['w'] == 1,
     );
   }
 
   /// The encrypted parts of a message, before locking.
-  static Map<String, dynamic> contentsOf({required String text, String? mediaUrl, String? mediaName, String? replyToText, String? replyToSenderName}) => {
+  static Map<String, dynamic> contentsOf({
+    required String text,
+    String? mediaUrl,
+    String? mediaName,
+    String? replyToText,
+    String? replyToSenderName,
+    bool walkie = false,
+  }) =>
+      {
+        if (walkie) 'w': 1,
         if (text.isNotEmpty) 't': text,
         if (mediaUrl != null) 'u': mediaUrl,
         if (mediaName != null) 'm': mediaName,
